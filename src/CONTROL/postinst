@@ -1,0 +1,20 @@
+#!/bin/sh
+
+echo "Stopping dbus-ble-sensors service"
+if [ -n "$(ls /sys/class/bluetooth)" ]; then
+    svc -d /service/dbus-ble-sensors
+fi
+
+echo "Disabling dbus-ble-sensors startup script"
+sed -i 's|^exec |#exec |g' /opt/victronenergy/dbus-ble-sensors/start-ble-sensors.sh
+sed -i '\|--banner|a\
+svc -d .' /opt/victronenergy/dbus-ble-sensors/start-ble-sensors.sh
+
+echo "Modifying bluetooth services autostart scripts"
+sed -i 's|/service/dbus-ble-sensors |/service/dbus-ble-sensors-py |g' /lib/udev/bt-config
+sed -i '\|/service/dbus-ble-sensors$|a\
+    svc -d /service/dbus-ble-sensors-py' /lib/udev/bt-remove
+
+echo "Starting dbus-ble-sensors-py service"
+cp -r /opt/victronenergy/service/dbus-ble-sensors-py /service/
+cp -r /opt/victronenergy/service/dbus-ble-sensors-py-launcher /service/

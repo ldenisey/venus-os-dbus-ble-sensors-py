@@ -1,0 +1,84 @@
+#!/bin/sh
+#
+# dbus-ble-sensors-py-launcher script.
+# Monitor dbus setting to start/stop service dbus-ble-sensors-py accordingly.
+SCRIPT_DIR=$(dirname $(readlink -f "$0"))
+svc_name=$(basename "$SCRIPT_DIR")
+echo "*** starting $svc_name ***"
+exec 2>&1
+set -e
+
+get_setting() {
+  dbus-send --print-reply=literal --system --type=method_call \
+  --dest=com.victronenergy.settings "$1" com.victronenergy.BusItem.GetValue |
+  awk '/int32/ { print $NF; exit }'
+}
+
+start() {
+  [ "$STATE" = "1" ] && return
+  echo "Starting dbus-ble-sensors-py service..."
+  svc -u /service/dbus-ble-sensors-py
+  STATE="1"
+}
+
+stop() {
+  [ "$STATE" = "0" ] && return
+  echo "Stopping dbus-ble-sensors-py service..."
+  svc -d /service/dbus-ble-sensors-py
+  STATE="0"
+}
+
+# Trap signals to stop the service gracefully
+quit() {
+  stop
+  [ -n "$FIFO" ] && rm -f "$FIFO"
+  exit 0
+}
+trap 'quit' INT TERM EXIT
+
+# Wait for com.victronenergy.settings to be available
+while :; do
+  if dbus-send --system --type=method_call --print-reply=literal \
+      --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>/dev/null |
+      grep -q "com.victronenergy.settings"; then
+    break
+  fi
+  echo "Waiting for com.victronenergy.settings D-Bus service..."
+  sleep 1
+done
+
+# Apply initial state
+STATE=$(svstat /service/dbus-ble-sensors-py 2>/dev/null | awk '/up/ {print 1; exit} /down/ {print 0; exit} END{print 0}')
+setting=$(get_setting /Settings/Services/BleSensors)
+if [ "$setting" = "1" ]; then
+  start
+else
+  stop
+fi
+
+# Listens for PropertiesChanged on /Settings/Services/BleSensors
+FIFO="/tmp/dbus_ble_sensors_pipe.$$"
+rm -f "$FIFO"
+mkfifo "$FIFO"
+dbus-monitor --system \
+  "type='signal',sender='com.victronenergy.settings',path='/Settings/Services/BleSensors',interface='com.victronenergy.BusItem',member='PropertiesChanged'" \
+  "type='signal',sender='com.victronenergy.settings',path='/Settings/Services/BleSensors',interface='com.victronenergy.BusItem',member='ValueChanged'" > "$FIFO" &
+MONITOR_PID=$!
+
+
+while IFS= read -r line; do
+  case "$line" in
+    *int32* )
+      state=${line##*int32 }
+      case "$state" in
+        1) start ;;
+        0) stop ;;
+        *) ;; # ignore anything else
+      esac
+    ;;
+  esac
+done < "$FIFO"
+
+# If the loop exits, clean up
+kill "$MONITOR_PID" 2>/dev/null
+quit

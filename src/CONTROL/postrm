@@ -1,0 +1,24 @@
+#!/bin/sh
+
+echo "Stopping dbus-ble-sensors-py services"
+svc -d /service/dbus-ble-sensors-py
+svc -d /service/dbus-ble-sensors-py-launcher
+sleep 1
+rm -r /service/dbus-ble-sensors-py
+rm -r /service/dbus-ble-sensors-py-launcher
+rm -r /opt/victronenergy/dbus-ble-sensors-py # Remove leftovers, execution __pychache__
+rm -r /var/log/dbus-ble-sensors-py
+rm -r /var/log/dbus-ble-sensors-py-launcher
+
+echo "Modifying ble services autostart scripts"
+sed -i 's|/service/dbus-ble-sensors-py |/service/dbus-ble-sensors |g' /lib/udev/bt-config
+sed -i '\|^ *svc -d /service/dbus-ble-sensors-py *$|d' /lib/udev/bt-remove
+
+echo "Enabling dbus-ble-sensors startup script"
+sed -i 's|^#exec |exec |g' /opt/victronenergy/dbus-ble-sensors/start-ble-sensors.sh
+sed -i '/^svc -d ./d' /opt/victronenergy/dbus-ble-sensors/start-ble-sensors.sh
+
+echo "Starting dbus-ble-sensors service"
+if [ -n "$(ls /sys/class/bluetooth)" ]; then
+    svc -u /service/dbus-ble-sensors
+fi

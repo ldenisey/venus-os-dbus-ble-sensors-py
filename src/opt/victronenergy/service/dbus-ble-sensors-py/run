@@ -1,0 +1,5 @@
+#!/bin/sh
+svc_name=$(basename $(dirname $(readlink -f "$0")))
+echo "*** starting $svc_name ***"
+exec 2>&1
+exec "/opt/victronenergy/$svc_name/start-$svc_name.sh"
