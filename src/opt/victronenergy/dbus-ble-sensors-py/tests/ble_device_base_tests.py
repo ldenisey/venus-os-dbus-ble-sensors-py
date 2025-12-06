@@ -11,11 +11,11 @@ import logging
 # @unittest.skip("Base test class")
 class BleDeviceBaseTests(unittest.TestCase):
 
-    def setUp(self, dev_class, dev_mac: str, dev_name: str):
+    def setUp(self, dev_class, dev_mac: str):
         logging.basicConfig(level=logging.DEBUG)
         self.maxDiff = None  # See full comparison on failures
         BleRole.load_classes(os.path.dirname(os.path.abspath(__file__)))
-        self.device = dev_class(dev_mac, dev_name)
+        self.device = dev_class(dev_mac)
 
     def tearDown(self):
         del self.device

@@ -21,7 +21,8 @@ class BleDeviceGobius(BleDevice):
         self.info.update({
             'manufacturer_id': BleDeviceGobius.MANUFACTURER_ID,
             'product_id': 0x0000,  # TODO: find the appropriate value
-            'product_name': 'Gobius C',
+            'product_name': 'Gobius sensor',
+            'device_name': 'Gobius C',
             'dev_prefix': 'gobius',
             'firmware_version': f"{manufacturer_data[7]}.{manufacturer_data[8]}.{manufacturer_data[9]}",
             'roles': {'tank': {}},

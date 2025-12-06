@@ -29,7 +29,8 @@ class DbusBleSensors(object):
     - https://github.com/victronenergy/node-red-contrib-victron/blob/master/src/nodes/victron-virtual.js
     - https://github.com/victronenergy/gui-v2/blob/main/data/mock/conf/services/ruuvi-salon.json
 
-    TODO: Handle ve item format using units definition on GetText callbacks
+    TODO: Find Gobius ans SolarSense product ids
+    TODO: Handle ve item format using units definition on GetText callbacks ?
     """
 
     def __init__(self):
@@ -101,8 +102,7 @@ class DbusBleSensors(object):
                 # Ignoring devices already evaluated
                 return
 
-            dev_name = device.name
-            plog = f"{dev_mac} - {dev_name} {dev_mac[-4:].upper()}:"
+            plog = f"{dev_mac} - {device.name}:"
             logging.debug(f"{plog} received advertisement {advertisement_data!r}")
             if advertisement_data.manufacturer_data is None or len(advertisement_data.manufacturer_data) < 1:
                 logging.info(f"{plog} ignoring, device without manufacturer data")
@@ -121,7 +121,9 @@ class DbusBleSensors(object):
                     # Run device specific parsing
                     logging.info(f"{plog} initializing device with class {device_class}")
                     try:
-                        dev_instance = device_class(dev_mac, dev_name)
+                        dev_instance = device_class(dev_mac)
+                        if not dev_instance.check_manufacturer_data(man_data):
+                            raise ValueError(f"{plog} ignoring, manufacturer data check failed")
                         dev_instance.configure(man_data)
                         dev_instance.init()
                         self._known_mac[dev_mac] = dev_instance

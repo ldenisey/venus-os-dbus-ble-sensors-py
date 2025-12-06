@@ -11,7 +11,7 @@ class BleDeviceGobiusTest(BleDeviceBaseTests):
     # To be executed with command : python3 -m unittest test_ble_device_gobius.py
 
     def setUp(self):
-        super().setUp(BleDeviceGobius, '012345678901', 'Gobius C')
+        super().setUp(BleDeviceGobius, '012345678901')
 
     def test_gobius_level(self):
         self.assertEqual(self.device.gobius_level(0xffff), -1)

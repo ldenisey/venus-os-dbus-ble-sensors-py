@@ -1,5 +1,6 @@
 from ve_types import *
 from ble_device import BleDevice
+from dbus_role_service import DbusRoleService
 
 
 class BleDeviceSafiery(BleDevice):
@@ -15,8 +16,9 @@ class BleDeviceSafiery(BleDevice):
     def configure(self, _: bytes):
         self.info.update({
             'manufacturer_id': BleDeviceSafiery.MANUFACTURER_ID,
-            'product_id': 0x0000,  # TODO: find the appropriate value
-            'product_name': 'StarTank',
+            'product_id': 0xC02D,
+            'product_name': 'Safiery Star-Tank sensor',
+            'device_name': 'StarTank',
             'dev_prefix': 'safiery',
             'roles': {'tank': {'flags': ['TANK_FLAG_TOPDOWN']}},
             'regs': [
@@ -81,6 +83,12 @@ class BleDeviceSafiery(BleDevice):
                     'scale': 1024,
                     # .format	= &veUnitG2Dec,
                 },
+            ],
+            'alarms': [
+                {
+                    'name': '/Alarms/LowBattery',
+                    'update': self._get_low_battery_state
+                }
             ]
         })
 
@@ -95,3 +103,10 @@ class BleDeviceSafiery(BleDevice):
                 manufacturer_data[7] != int(dev_mac[10:], 16):
             return False
         return True
+
+    def _get_low_battery_state(self, role_service: DbusRoleService) -> int:
+        if (battery_voltage := role_service.get('BatteryVoltage', None)) is None:
+            return 0
+        # Percentage based on 3 volt CR2477 battery
+        battery_percentage = max(0, min(100, ((battery_voltage - 2.2) / 0.65) * 100))
+        return int(battery_percentage < 15)

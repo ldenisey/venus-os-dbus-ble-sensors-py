@@ -2,11 +2,9 @@ import sys
 import os
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..', 'ext', 'velib_python'))
-import unittest
 from ble_device import BleDevice
 from ble_device_base_tests import BleDeviceBaseTests
 from ve_types import *
-import logging
 
 
 class _DummyDevice(BleDevice):
@@ -16,6 +14,7 @@ class _DummyDevice(BleDevice):
         self.info.update({
             'product_id': 1,
             'product_name': 'Dummy',
+            'device_name': 'Dummy',
             'dev_prefix': 'dummy',
             'roles': {'temperature': {}, 'movement': {}},
             'regs': [
@@ -41,7 +40,7 @@ class _DummyDevice(BleDevice):
 
 class BleDeviceParsingTests(BleDeviceBaseTests):
     def setUp(self):
-        super().setUp(_DummyDevice, '001122334455', 'Dummy')
+        super().setUp(_DummyDevice, '001122334455')
 
     def test_numeric_and_string_parsing(self):
         # 0-1: for Ubits with shift 3, bits 10 => take 10 bits from 13-bit window

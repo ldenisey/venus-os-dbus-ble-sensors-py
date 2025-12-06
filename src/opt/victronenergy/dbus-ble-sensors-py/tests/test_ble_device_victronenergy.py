@@ -11,7 +11,7 @@ class BleDeviceVictronEnergyTests(BleDeviceBaseTests):
     # To be executed with command : python3 -m unittest test_ble_device_victronenergy.py
 
     def setUp(self):
-        super().setUp(BleDeviceVictronEnergy, '012345678901', 'SolarSense_750')
+        super().setUp(BleDeviceVictronEnergy, '012345678901')
 
     def test_1(self):
         """

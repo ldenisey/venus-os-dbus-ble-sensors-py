@@ -25,7 +25,7 @@ class BleDevice(object):
     # Dict of devices classes, key is manufacturer id
     DEVICE_CLASSES = {}
 
-    def __init__(self, dev_mac: str, dev_name: str):
+    def __init__(self, dev_mac: str):
         self._role_services: dict = {}
         self._plog: str = None
 
@@ -33,8 +33,8 @@ class BleDevice(object):
         self.info = {
             'dev_mac': dev_mac,         # Internal
             'product_id': 0x0000,       # Mandatory, int, custom product id. As no product ID list exists, invent one.
-            'product_name': None,       # Mandatory, str, product name without spaces or special chars
-            'DeviceName': dev_name,     # Optional, str, human friendly device name, i.e. Ruuvi AABB
+            'product_name': None,       # Mandatory, str, general manufacturer product name, i.e. 'Mopeka sensor'
+            'device_name': None,         # Mandatory, str, UI default device name, i.e. 'Mopeka LPG'
             'hardware_version': '1.0.0',  # Optional,  str, Device hardware version
             'firmware_version': '1.0.0',  # Optional,  str, Device firmware version
             'dev_prefix': None,         # Mandatory, str, device prefix, used in dbus path, must be short, without spaces
@@ -121,10 +121,10 @@ class BleDevice(object):
 
     def _load_configuration(self):
         self.info['manufacturer_id'] = self.MANUFACTURER_ID
-        self.info['DeviceName'] = self.info['DeviceName'] + ' ' + self.info['dev_mac'][-4:].upper()
-        self._plog = f"{self.info['dev_mac']} - {self.info['DeviceName']}:"
+        self.info['device_name'] = self.info['device_name'] + ' ' + self.info['dev_mac'][-6:].upper()
+        self._plog = f"{self.info['dev_mac']} - {self.info['device_name']}:"
 
-        for key in ['manufacturer_id', 'product_id', 'product_name', 'DeviceName', 'dev_prefix', 'roles', 'regs', 'settings', 'alarms']:
+        for key in ['manufacturer_id', 'product_id', 'product_name', 'device_name', 'dev_prefix', 'roles', 'regs', 'settings', 'alarms']:
             if key not in self.info:
                 raise ValueError(f"{self._plog} configuration '{key}' is missing")
             if self.info[key] is None:

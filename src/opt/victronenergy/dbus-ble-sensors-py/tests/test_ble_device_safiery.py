@@ -11,7 +11,7 @@ class BleDeviceSafieryTests(BleDeviceBaseTests):
     # To be executed with command : python3 -m unittest test_ble_device_safiery.py
 
     def setUp(self):
-        super().setUp(BleDeviceSafiery, '012345332211', 'StarTank')
+        super().setUp(BleDeviceSafiery, '012345332211')
 
     def test_nic_mismatch(self):
         raw = b'\x0A\x64\xB2\x2C\x01\x00\x00\x00\xFE\x05'

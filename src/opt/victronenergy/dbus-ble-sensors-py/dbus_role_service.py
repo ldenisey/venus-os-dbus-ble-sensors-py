@@ -84,7 +84,7 @@ class DbusRoleService(object):
         self._dbus_service.add_path('/HardwareVersion', self._ble_device.info['hardware_version'])
         self._dbus_service.add_path('/Connected', 1, writeable=True)
         self._dbus_service.add_path('/Status', 0, writeable=True)
-        self._dbus_service.add_path('/DeviceName', self._ble_device.info['DeviceName'])
+        self._dbus_service.add_path('/DeviceName', self._ble_device.info['device_name'])
 
     def _add_settings(self, settings: dict):
         for setting in settings:

@@ -1,6 +1,7 @@
 from ve_types import *
 import logging
 from ble_device import BleDevice
+from dbus_role_service import DbusRoleService
 
 
 class BleDeviceTeltonika(BleDevice):
@@ -22,7 +23,8 @@ class BleDeviceTeltonika(BleDevice):
         self.info.update({
             'manufacturer_id': BleDeviceTeltonika.MANUFACTURER_ID,
             'product_id': 0x3042,
-            'product_name': 'TeltonikaEye',
+            'product_name': 'Teltonika sensor',
+            'device_name': 'Teltonika Eye',
             'dev_prefix': 'teltonika',
             'alarms': [
                 {
@@ -182,5 +184,5 @@ class BleDeviceTeltonika(BleDevice):
                 'bias': 2000,
             })
 
-    def _get_low_battery_state(self, role_service) -> int:
+    def _get_low_battery_state(self, role_service: DbusRoleService) -> int:
         return int((role_service['LowBattery'] or 0) >= 1)

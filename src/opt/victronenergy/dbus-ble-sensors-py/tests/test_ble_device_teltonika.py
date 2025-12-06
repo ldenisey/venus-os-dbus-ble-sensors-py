@@ -11,7 +11,7 @@ class BleDeviceTeltonikaTests(BleDeviceBaseTests):
     # To be executed with command : python3 -m unittest test_ble_device_teltonika.py
 
     def setUp(self):
-        super().setUp(BleDeviceTeltonika, '7cd9f411427d', 'PITCH_ROLL')
+        super().setUp(BleDeviceTeltonika, '7cd9f411427d')
 
     # @unittest.skip("Temporarily disabled for debugging")
     def test_spec_example(self):
@@ -141,4 +141,4 @@ class BleDeviceTeltonikaTests(BleDeviceBaseTests):
         with self.assertRaises(ValueError) as e:
             self._test_parsing(raw_data, expected_dict)
         self.assertEqual(str(e.exception),
-                         "7cd9f411427d - PITCH_ROLL 427D: Configuration 'roles' must have at least one element")
+                         "7cd9f411427d - Teltonika Eye 11427D: Configuration 'roles' must have at least one element")
