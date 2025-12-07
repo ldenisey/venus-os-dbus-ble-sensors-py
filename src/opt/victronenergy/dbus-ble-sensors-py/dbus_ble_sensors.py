@@ -82,8 +82,9 @@ class DbusBleSensors(object):
             props = dbus.Interface(adapter, 'org.freedesktop.DBus.Properties')
             mac = props.Get('org.bluez.Adapter1', 'Address')
             logging.info(f"{name}: adding adapter, path={path!r}, address={mac!r}")
-            self._adapters.append(name)
-            self._dbus_ble_service.add_ble_adapter(name, mac)
+            if name not in self._adapters:
+                self._adapters.append(name)
+                self._dbus_ble_service.add_ble_adapter(name, mac)
 
     def _on_interfaces_removed(self, path, interfaces):
         if not str(path).startswith('/org/bluez'):

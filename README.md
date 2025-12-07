@@ -15,9 +15,21 @@ Add the [venus-os-configuration opkg feed](./VenusOS-Opkg_configuration.md#addin
 opkg install dbus-ble-sensors-py
 ```
 
-If your are satisfied and want to make it persistent to firmware upgrades, you can [install mod-persist](./VenusOS-Mod_persist.md.md#how-to-install-it) then :
+To make it persistent to Venus OS firmware upgrades, you can [install mod-persist](./VenusOS-Mod_persist.md.md#how-to-install-it) then :
 ``` bash
 persist-opkg install dbus-ble-sensors-py
 ```
 
+## Usage
 
+This service replaces official dbus ble service while keeping its configuration process accessible in official documentation.  
+Devices can be enable/disabled in *Settings* -> *Integrations* -> *Bluetooth Sensors*. Once enabled, they can be configured in
+*Settings* -> *Devices* menu.
+
+> [!NOTE]  
+> Even though the configuration process is the same, the configuration themselves are NOT shared between this service and official ble service
+> hence configuration of devices managed by both will have to be reapplied upon installation/desintallation.
+
+## Development
+
+See [dedicated developer page](DEVELOPMENT.md).
