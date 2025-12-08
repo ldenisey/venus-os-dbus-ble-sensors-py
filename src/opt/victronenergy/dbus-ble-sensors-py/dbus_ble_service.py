@@ -161,12 +161,18 @@ class DbusBleService(object):
             dbus_role_service.on_enabled_changed
         )
 
+    def is_device_role_enabled(self, device_info: dict, role_name: str) -> bool:
+        """
+        Check if the given role is enabled through settings
+        """
+        return bool(self._get_value(f"/Devices/{device_info['dev_id']}_{role_name}/Enabled"))
+
     def is_device_enabled(self, device_info: dict) -> bool:
         """
         Check if at least one of the device sensors is enabled
         """
         for role_name in device_info['roles']:
-            if self._get_value(f"/Devices/{device_info['dev_id']}_{role_name}/Enabled"):
+            if self.is_device_role_enabled(device_info, role_name):
                 return True
         return False
 

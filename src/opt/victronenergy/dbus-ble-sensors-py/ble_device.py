@@ -328,6 +328,9 @@ class BleDevice(object):
         sensor_data: dict = self._parse_manufacturer_data(manufacturer_data)
         logging.debug(f"{self._plog} data {manufacturer_data!r} parsed: {sensor_data!r}")
         for role_service in self._role_services.values():
+            if not DbusBleService.get().is_device_role_enabled(self.info, role_service.ble_role.NAME) is True:
+                logging.debug(f"{self._plog} role {role_service.ble_role.NAME!r} not enabled, skipping")
+                continue
             # Filtering data
             role_data = sensor_data[role_service.ble_role.NAME]
             if role_data:
