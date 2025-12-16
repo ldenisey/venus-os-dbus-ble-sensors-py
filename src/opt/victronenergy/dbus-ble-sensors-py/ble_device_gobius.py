@@ -66,7 +66,7 @@ class BleDeviceGobius(BleDevice):
             return False
 
         # Check NIC (Network Interface Controller)
-        dev_mac = self.info['dev_mac']
+        dev_mac = self.info['dev_mac'].upper()
         if manufacturer_data[4] != int(dev_mac[6:8], 16) or \
                 manufacturer_data[5] != int(dev_mac[8:10], 16) or \
                 manufacturer_data[6] != int(dev_mac[10:], 16):

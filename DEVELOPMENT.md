@@ -2,9 +2,9 @@
 
 ## Local execution
 
-After cloning, execute script [requirements.sh](./src/CONTROL/requirements.sh) to download thid party libraries.
+After cloning, execute script [requirements.sh](./src/CONTROL/requirements.sh) to download third party libraries.
 
-To execute locally on a Venus OS device, stop existing *dbus-ble-sensors* service with command `svc /service/dbus-ble-sensors`
+To execute locally on a Venus OS device, stop existing *dbus-ble-sensors* service with command `svc -d /service/dbus-ble-sensors`
 and execute `python3 dbus-ble-sensors-py` (parameter `-d` activates debug traces).
 
 ## Tests
@@ -15,17 +15,17 @@ They can be executed with `python3 -m unittest -v` or selectively with `python3 
 ## Project architecture
 
 [dbus_ble_sensors.py](./src/opt/victronenergy/dbus-ble-sensors-py/dbus_ble_sensors.py) is the entry pont,
-reponsible of listing bluetooth adapters, running scans, filtering advertising frame and redirect wanted
-one to the responsible device class.
+reponsible for listing bluetooth adapters, running scans, filtering and redirecting advertising frames 
+to the responsible device class.
 
-[ble_role.py](./src/opt/victronenergy/dbus-ble-sensors-py/ble_role.py) and it subclasses `ble_role_*.py` defines base
+[ble_role.py](./src/opt/victronenergy/dbus-ble-sensors-py/ble_role.py) and it subclasses `ble_role_*.py` define base
 features (data) that a device can provide: `temperature`, `tank`, `meteo`, `digitalinput` and `movement`.
-One device can have multiple role, i.e. a temperature sensor can also provide movement or magnet input data.
-Role clases can also define common settings, mostly when required by the GUI, and alarms.
+One device can have multiple roles, i.e. a temperature sensor can also provide movement or magnet input data.
+Role classes can also define common settings (mostly those used by the GUI) and alarms.
 
 [ble_device.py](./src/opt/victronenergy/dbus-ble-sensors-py/ble_device.py) and its subclasses `ble_device_*.py` are
 device definition classes. There can only be one class per manufacturer but one class can manage several devices
-of the same manufacturer. Beside identification information, it contains the manufacturer data parsing rules
+of the same manufacturer. Beside identification information, it contains bluetooth manufacturer data parsing rules
 and optionally settings and alarms.
 
 [dbus_settings_service](./src/opt/victronenergy/dbus-ble-sensors-py/dbus_settings_service.py) reads/writes settings from
@@ -33,7 +33,7 @@ and optionally settings and alarms.
 
 [dbus_ble_service](./src/opt/victronenergy/dbus-ble-sensors-py/dbus_ble_service.py) publishes the *com.victronenergy.ble*
 service expected by the *Settings* -> *Integrations* -> *Bluetooth Sensors* UI  menu to expose configuration
-and detected bluetooth devices.
+and bluetooth devices.
 
 [dbus-role-service](./src/opt/victronenergy/dbus-ble-sensors-py/dbus_role_service.py) publishes one specific dbus service
 for every device's role. Those will expose the parsed data to the UI and to other services.
@@ -51,7 +51,7 @@ This class must :
 
 This class can :
 - implement `check_manufacturer_data(bytes) -> bool` which is called for quick manufacturer data frame check before parsing, for example on data length and/or predefined bytes.
-- implement `update_data(role_service, sensor_data)` which is called after manufacturer data parsing but before they are published in dbus, it can be used for any data transformation that couldn't easily be specified through parsing regs.
+- implement `update_data(role_service, sensor_data)` which is called after manufacturer data parsing but before they are published in dbus, it can be used for any data transformation that can not be done with parsing regs.
 - host device parsing *xlate*, alarm *update* and setting *onchange* needed methods.
 
 #### Device info fields
@@ -62,8 +62,8 @@ This class can :
 | `product_name`     | Mandatory  | `str`        | general product name (e.g., 'Mopeka sensor')                |
 | `device_name`      | Mandatory  | `str`        | default UI device name (e.g. 'Mopeka LPG')                  |
 | `dev_prefix`       | Mandatory  | `str`        | short, no spaces, used to build service paths and device id |
-| `hardware_version` | Optional   | `str`        | Device hardware version                                     |
-| `firmware_version` | Optional   | `str`        | Device firmware version                                     |
+| `hardware_version` | Optional   | `str`        | device hardware version                                     |
+| `firmware_version` | Optional   | `str`        | device firmware version                                     |
 | `roles`            | Mandatory  | `dict`       | keys are role names, values are role-specific dict config   |
 | `regs`             | Mandatory  | `list[dict]` | byte [parsing rules](#parsing-rules) list                   |
 | `settings`         | Optional   | `list[dict]` | list of [settings](#settings)                               |
@@ -82,18 +82,18 @@ Each reg dictionary define how to extract one value from sensor manufacturer dat
 | `shift`  | Optional   | `int`               | right bit shift to apply to raw data                                                                               |
 | `bits`   | Depends    | `int`               | mandatory for `VE_HEAP_STR` type else default value is based on type field                                         |
 | `scale`  | Optional   | `int`               | value to divide the raw data with                                                                                  |
-| `bias`   | Optional   | `int`               | value to add to the raw data with, applied after scale if both are set                                             |
+| `bias`   | Optional   | `int`               | value to add to the raw data with                                                                                  |
 | `xlate`  | Optional   | callable            | custom method to modify the raw data                                                                               |
-| `flags`  | Optional   | `list[str]`         | list of `REG_FLAG_INVALID` (enables `inval`), `REG_FLAG_BIG_ENDIAN` (read bytes as big-endian)                     |
+| `flags`  | Optional   | `list[str]`         | list of `REG_FLAG_INVALID` (enables `inval`) or `REG_FLAG_BIG_ENDIAN` (read bytes as big-endian)                     |
 | `inval`  | Optional   | `int`               | if `REG_FLAG_INVALID` flag is set, sentinel value marking the value invalid (`None`)                               |
 
 > [!NOTE]  
-> Computation are done in the order: extract `type` or `bits` length at `offset` position, `shift`, `bits` mask,
+> Computation are done in this order: extract `type` or `bits` length at `offset` position, `shift`, `bits` mask,
 > two’s complement conversion depending of `type`, `scale`, `bias`, `xlate`, `inval`
 
 > [!NOTE]  
 > `xlate` can only access the raw data it is defined for. If your custom computation requires other parsed data or settings,
-> override `def update_data(self, role_service: DbusRoleService, sensor_data: dict)` method instead.
+> override `update_data` method instead.
 
 > [!NOTE]  
 > `VE_HEAP_STR` (string value) requires `bits` divisible by 8; raw value is NUL-stripped and decoded as UTF-8.
@@ -119,7 +119,7 @@ They will trigger a notification in the UI, alarm state will also make the devic
 
 They are defined with a dict containing :
 - `name` string in PascalCase, without space or special chars except `/` separators for hierarchical organization
-- `update` callable with signature `update(role_service) -> int` return alarm new state based on latest data: 0 (none), 1 (warning), 2 (alarm).
+- `update` callable returning alarm new state based on latest data: 0 (none), 1 (warning), 2 (alarm).
 
 > [!NOTE]  
 > Warning/alarm levels are not consistent through the different roles and new alarms can not be added to the predefined ones.

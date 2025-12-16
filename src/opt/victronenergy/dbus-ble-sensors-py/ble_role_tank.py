@@ -207,17 +207,12 @@ class BleRoleTank(BleRole):
         role_service['Remaining'] = 0.0
         role_service['Level'] = 0.0
 
-    def _invalidate_data_items(self, role_service):
-        role_service['Level'] = None
-        role_service['Remaining'] = None
-        role_service['Status'] = 4
-
     def _compute_level(self, rawValue: float, empty: float, full: float, capacity: float) -> tuple[int, float, int]:
         """
         Compute tank info based on parameters and returns (level, remaining volume, status code)
         """
         error = (None, None, 4)
-        if rawValue is None or empty is None or full is None or capacity is None:
+        if rawValue is None or rawValue == 1 or empty is None or full is None or capacity is None:
             return error
 
         if self._is_topdown:

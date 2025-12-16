@@ -29,7 +29,6 @@ class DbusBleSensors(object):
     - https://github.com/victronenergy/node-red-contrib-victron/blob/master/src/nodes/victron-virtual.js
     - https://github.com/victronenergy/gui-v2/blob/main/data/mock/conf/services/ruuvi-salon.json
 
-    TODO: Find Gobius ans SolarSense product ids
     TODO: Handle ve item format using units definition on GetText callbacks ?
     """
 
