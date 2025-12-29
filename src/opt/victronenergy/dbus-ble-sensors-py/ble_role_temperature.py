@@ -1,5 +1,6 @@
 from ble_role import BleRole
 from ve_types import *
+import logging
 
 
 class BleRoleTemperature(BleRole):
@@ -54,7 +55,10 @@ class BleRoleTemperature(BleRole):
 
     def update_data(self, role_service, sensor_data: dict):
         # Keeping track of sensor latest value for offset updates
-        self._raw_temp = sensor_data['Temperature']
+        self._raw_temp = sensor_data.get('Temperature', None)
+        if self._raw_temp is None:
+            logging.warning(f"{self._plog} Temperature data not found in sensor data")
+            return
 
         # Apply offset to temperature value
         if (offset := role_service['Offset']):

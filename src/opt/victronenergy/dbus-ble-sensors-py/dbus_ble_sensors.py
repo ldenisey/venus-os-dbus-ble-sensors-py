@@ -4,6 +4,7 @@ import os
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), 'ext'))
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), 'ext', 'velib_python'))
 import logging
+from logging.handlers import RotatingFileHandler
 import asyncio
 import dbus
 from dbus.mainloop.glib import DBusGMainLoop
@@ -16,8 +17,11 @@ import gbulb
 from logger import setup_logging
 from collections.abc import MutableMapping
 import time
-from conf import SCAN_TIMEOUT, SCAN_SLEEP, IGNORED_DEVICES_TIMEOUT, DEVICE_SERVICES_TIMEOUT
+from conf import SCAN_TIMEOUT, SCAN_SLEEP, IGNORED_DEVICES_TIMEOUT, DEVICE_SERVICES_TIMEOUT, PROCESS_VERSION
+from man_id import MAN_NAMES
 
+SNIF_LOGGER = logging.getLogger("sniffer")
+SNIF_LOGGER.propagate = False
 
 class DbusBleSensors(object):
     """
@@ -112,9 +116,13 @@ class DbusBleSensors(object):
             # Loop through manufacturer data fields, even though most devices only use one
             for man_id, man_data in advertisement_data.manufacturer_data.items():
                 if dev_mac not in self._known_mac:
+                    # Snif new device advertising data
+                    self.snif_data(man_id, man_data)
+
+                    # Get device class from manufacturer id
                     device_class = BleDevice.DEVICE_CLASSES.get(man_id, None)
                     if device_class is None:
-                        logging.info(f"{plog} ignoring, no device configuration class for manufacturer {man_id!r}")
+                        logging.info(f"{plog} ignoring data {man_data!r}, no device configuration class for manufacturer {man_id!r}")
                         self._ignored_mac[dev_mac] = True
                         continue
 
@@ -123,13 +131,12 @@ class DbusBleSensors(object):
                     try:
                         dev_instance = device_class(dev_mac)
                         if not dev_instance.check_manufacturer_data(man_data):
-                            raise ValueError(f"{plog} ignoring, manufacturer data check failed")
+                            raise ValueError(f"{plog} ignoring data {man_data!r}, manufacturer data check failed")
                         dev_instance.configure(man_data)
                         dev_instance.init()
                         self._known_mac[dev_mac] = dev_instance
                     except Exception as e:
-                        logging.info(f"{plog} ignoring, an error occurred during device initialization: {e}")
-                        self._ignored_mac[dev_mac] = True
+                        logging.exception(f"{plog} ignoring data {man_data!r}, an error occurred during device initialization:")
                         continue
                 else:
                     dev_instance = self._known_mac[dev_mac]
@@ -170,6 +177,13 @@ class DbusBleSensors(object):
                 logging.debug(f"{self._adapters}: continuous scan off, pausing for {SCAN_SLEEP!r} seconds")
                 await asyncio.sleep(SCAN_SLEEP)
 
+    def snif_data(self, man_id: int, man_data: bytes):
+        """
+        Snif advertising data for given manufacturer id and data.
+        Used for external sniffer mode.
+        """
+        man_name = MAN_NAMES.get(man_id, hex(man_id).upper())
+        SNIF_LOGGER.info(f"{man_name!r}: {man_data!r}")
 
 class DatedDict(MutableMapping):
     """
@@ -222,12 +236,28 @@ class DatedDict(MutableMapping):
 
 def main():
     parser = ArgumentParser(description=sys.argv[0])
+    parser.add_argument('--version', '-v', action='version', version=PROCESS_VERSION)
     parser.add_argument('--debug', '-d', help='Turn on debug logging', default=False, action='store_true')
+    parser.add_argument('--snif', '-s', help='Turn on advertising data sniffer', default=False, action='store_true')
     args = parser.parse_args()
+
+    # Set default logger
     setup_logging(args.debug)
     if args.debug:
         # Mute overly verbose libraries
         logging.getLogger("bleak").setLevel(logging.INFO)
+
+    # Set sniffer logger
+    if args.snif:
+        handler = RotatingFileHandler(
+            "/var/log/dbus-ble-sensors-py/sniffer.log",
+            maxBytes=512 * 1024,  # rotate after 512KB
+            backupCount=0,        # keep 5 rolled files: sniffer.log.1 ... .5
+            encoding="utf-8",
+            delay=True            # create file only on first emit
+        )
+        handler.setFormatter(logging.Formatter(fmt='%(message)s'))
+        SNIF_LOGGER.addHandler(handler)
 
     # Init gbulb, configure GLib and integrate asyncio in it
     gbulb.install()
