@@ -17,7 +17,7 @@ class BleDeviceRuuvi(BleDevice):
     - https://github.com/victronenergy/dbus-ble-sensors/blob/master/src/ruuvi.c
     """
 
-    MANUFACTURER_ID = 0x0499
+    MANUFACTURER_ID = 0x0499 # 'Ruuvi Innovations Ltd.'
 
     @staticmethod
     def _get_low_battery_state(role_service: DbusRoleService) -> int:

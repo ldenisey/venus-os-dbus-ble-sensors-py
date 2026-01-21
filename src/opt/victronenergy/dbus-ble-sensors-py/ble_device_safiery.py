@@ -11,7 +11,7 @@ class BleDeviceSafiery(BleDevice):
     - https://github.com/victronenergy/dbus-ble-sensors/blob/master/src/safiery.c
     """
 
-    MANUFACTURER_ID = 0x0067
+    MANUFACTURER_ID = 0x0067 # 'GN Hearing'
 
     def configure(self, _: bytes):
         self.info.update({

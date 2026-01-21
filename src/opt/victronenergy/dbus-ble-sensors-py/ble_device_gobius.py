@@ -11,7 +11,7 @@ class BleDeviceGobius(BleDevice):
     - https://github.com/victronenergy/dbus-ble-sensors/blob/master/src/gobius.c
     """
 
-    MANUFACTURER_ID = 0x0F53
+    MANUFACTURER_ID = 0x0F53 # 'Fledt & Meiton Marin AB'
 
     _GOBIUS_ERROR = 0xffff
     _GOBIUS_STARTUP = 0xfffe

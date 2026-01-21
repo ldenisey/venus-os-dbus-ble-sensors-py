@@ -12,7 +12,7 @@ class BleDeviceVictronEnergy(BleDevice):
     - https://github.com/victronenergy/gui-v2/blob/main/data/mock/conf/services/meteo-solarsense.json
     """
 
-    MANUFACTURER_ID = 0x02E1
+    MANUFACTURER_ID = 0x02E1 # 'Victron Energy BV'
 
     def configure(self, _: bytes):
         self.info.update({

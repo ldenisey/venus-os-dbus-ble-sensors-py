@@ -20,7 +20,7 @@ class BleDeviceMopeka(BleDevice):
     - https://github.com/victronenergy/dbus-ble-sensors/blob/master/src/mopeka.c
     """
 
-    MANUFACTURER_ID = 0x0059
+    MANUFACTURER_ID = 0x0059 # 'Nordic Semiconductor ASA'
 
     MODELS = {
         3: {

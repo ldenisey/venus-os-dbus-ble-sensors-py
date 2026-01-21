@@ -17,7 +17,7 @@ class BleDeviceTeltonika(BleDevice):
         - https://wiki.teltonika-gps.com/view/EYE_SENSOR_/_BTSMP1#EYE_Sensor_Bluetooth%C2%AE_frame_parsing_example
     """
 
-    MANUFACTURER_ID = 0x089A
+    MANUFACTURER_ID = 0x089A # 'Private limited company "Teltonika"'
 
     def configure(self, manufacturer_data: bytes):
         self.info.update({
