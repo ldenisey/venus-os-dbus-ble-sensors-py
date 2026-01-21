@@ -12,7 +12,7 @@ class TestBleRoleTank(unittest.TestCase):
     # To be executed with command : python3 -m unittest test_ble_role_tank.py
 
     def setUp(self):
-        logging.basicConfig(level=logging.DEBUG)
+        #logging.basicConfig(level=logging.DEBUG)
         self.maxDiff = None  # See full comparison on failures
         # Default bottom-up tank
         self.tank = BleRoleTank(config={'flags': []})

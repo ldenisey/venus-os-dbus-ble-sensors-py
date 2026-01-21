@@ -81,3 +81,49 @@ class BleDeviceRuuviTests(BleDeviceBaseTests):
                 }
             }
         )
+
+    def test_parsing_3(self):
+        self._test_parsing(
+            b'\x05\x06lP\xc6\xff\xff\x02\x8c\x03\x08\x00\x18\x7fvX+\xb5\xe1\x8cst\xd9\xda',
+            {
+                'temperature': {
+                    'Temperature': 8.22,
+                    'Humidity': 51.695,
+                    'Pressure': 1155.35,
+                    'BatteryVoltage': 2.6189999999999998,
+                    'TxPower': 4.0,
+                    'SeqNo': 11189,
+                },
+                'movement': {
+                    'AccelX': 0.652,
+                    'AccelY': 0.776,
+                    'AccelZ': 0.024,
+                    'BatteryVoltage': 2.6189999999999998,
+                    'TxPower': 4.0,
+                    'SeqNo': 11189,
+                }
+            }
+        )
+
+    def test_parsing_4(self):
+        self._test_parsing(
+             b'\x05\x04"X@\xff\xff\x02\x94\x02\xfc\x00\x08{\x16dAI\xe1\x8cst\xd9\xda',
+            {
+                'temperature': {
+                    'Temperature': 5.29,
+                    'Humidity': 56.48,
+                    'Pressure': 1155.35,
+                    'BatteryVoltage': 2.584,
+                    'TxPower': 4.0,
+                    'SeqNo': 16713,
+                },
+                'movement': {
+                    'AccelX': 0.66,
+                    'AccelY': 0.764,
+                    'AccelZ': 0.008,
+                    'BatteryVoltage': 2.584,
+                    'TxPower': 4.0,
+                    'SeqNo': 16713,
+                }
+            }
+        )

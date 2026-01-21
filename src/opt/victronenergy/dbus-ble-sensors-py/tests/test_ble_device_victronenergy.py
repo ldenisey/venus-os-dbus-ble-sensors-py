@@ -1,5 +1,6 @@
 import sys
 import os
+import logging
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..', 'ext'))
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..', 'ext', 'velib_python'))
@@ -11,6 +12,7 @@ class BleDeviceVictronEnergyTests(BleDeviceBaseTests):
     # To be executed with command : python3 -m unittest test_ble_device_victronenergy.py
 
     def setUp(self):
+        logging.basicConfig(level=logging.DEBUG)
         super().setUp(BleDeviceVictronEnergy, '012345678901')
 
     def test_1(self):

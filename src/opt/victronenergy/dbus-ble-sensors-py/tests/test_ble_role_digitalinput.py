@@ -8,7 +8,7 @@ from ble_role_digitalinput import BleRoleDigitalInput
 
 class BleRoleDigitalInputTests(unittest.TestCase):
     def setUp(self):
-        logging.basicConfig(level=logging.DEBUG)
+        #logging.basicConfig(level=logging.DEBUG)
         self.role = BleRoleDigitalInput()
         self.role.check_configuration()
         self.svc = {

@@ -8,7 +8,7 @@ import logging
 
 class BleRoleTemperatureTests(unittest.TestCase):
     def setUp(self):
-        logging.basicConfig(level=logging.DEBUG)
+        #logging.basicConfig(level=logging.DEBUG)
         self.role = BleRoleTemperature()
         self.role.check_configuration()
 
