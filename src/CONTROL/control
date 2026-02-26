@@ -1,5 +1,5 @@
 Package: dbus-ble-sensors-py
-Version: 1.1.0
+Version: 1.1.1
 Description: Add support to unsupported bluetooth devices
  Generic Victron Energy Venus OS service to add support to all bluetooth devices, even unsupported officially.
 Section: base
