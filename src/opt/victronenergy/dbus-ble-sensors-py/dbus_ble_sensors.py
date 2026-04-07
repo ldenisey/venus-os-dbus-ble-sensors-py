@@ -13,6 +13,7 @@ from ble_device import BleDevice
 from ble_role import BleRole
 from dbus_ble_service import DbusBleService
 import bleak
+from bleak.assigned_numbers import AdvertisementDataType
 import gbulb
 from logger import setup_logging
 from collections.abc import MutableMapping
@@ -22,6 +23,22 @@ from man_id import MAN_NAMES
 
 SNIF_LOGGER = logging.getLogger("sniffer")
 SNIF_LOGGER.propagate = False
+
+# OrPattern tuples for passive scanning via BlueZ AdvertisementMonitor1.
+# Passive scanning avoids calling StartDiscovery, which eliminates scan
+# contention (InProgress errors) when multiple BLE services share the
+# adapter.  Each tuple is (offset, AD_type, value) matching common LE
+# Flags byte values so virtually all advertising devices are captured.
+# Requires BlueZ >= 5.56 with --experimental and kernel >= 5.10.
+PASSIVE_SCAN_OR_PATTERNS = [
+    (0, AdvertisementDataType.FLAGS, bytes([0x02])),
+    (0, AdvertisementDataType.FLAGS, bytes([0x06])),
+    (0, AdvertisementDataType.FLAGS, bytes([0x1a])),
+    (0, AdvertisementDataType.FLAGS, bytes([0x04])),
+    (0, AdvertisementDataType.FLAGS, bytes([0x05])),
+    (0, AdvertisementDataType.FLAGS, bytes([0x0e])),
+    (0, AdvertisementDataType.FLAGS, bytes([0x1e])),
+]
 
 class DbusBleSensors(object):
     """
@@ -150,11 +167,24 @@ class DbusBleSensors(object):
 
         logging.debug(f"{adapter}: Scanning ...")
         try:
-            async with bleak.BleakScanner(adapter=adapter, detection_callback=_scan_callback) as scanner:
+            async with bleak.BleakScanner(
+                detection_callback=_scan_callback,
+                scanning_mode='passive',
+                bluez=dict(or_patterns=PASSIVE_SCAN_OR_PATTERNS, adapter=adapter),
+            ) as scanner:
                 await asyncio.sleep(SCAN_TIMEOUT)
-            logging.debug(f"{adapter}: Scan finished")
-        except Exception:
-            logging.exception(f"{adapter}: Scan error")
+            logging.debug(f"{adapter}: Scan finished (passive)")
+        except Exception as e_passive:
+            logging.warning(f"{adapter}: Passive scan failed ({e_passive}), falling back to active scan")
+            try:
+                async with bleak.BleakScanner(
+                    detection_callback=_scan_callback,
+                    bluez=dict(adapter=adapter),
+                ) as scanner:
+                    await asyncio.sleep(SCAN_TIMEOUT)
+                logging.debug(f"{adapter}: Scan finished (active fallback)")
+            except Exception:
+                logging.exception(f"{adapter}: Scan error")
 
     async def scan_loop(self):
         while True:
