@@ -106,7 +106,38 @@ BTP7_CAPTURE = bytes.fromhex('9104001900006e6e6e6e6e820000')
 # ===================================================================
 
 class _NullRole:
-    """Stub role whose update_data is a no-op."""
+    """Stub role whose update_data is a no-op and has no alarms."""
+    info = {'alarms': []}
+
+    def update_data(self, role_service, sensor_data):
+        pass
+
+
+def _get_alarm_low_state(role_service) -> int:
+    if role_service['/Alarms/Low/Enable']:
+        alarm_state = bool(role_service['/Alarms/Low/State'])
+        threshold = role_service[f"/Alarms/Low/{'Restore' if alarm_state else 'Active'}"]
+        return int(float(role_service['Level']) < threshold)
+    return 0
+
+
+def _get_alarm_high_state(role_service) -> int:
+    if role_service['/Alarms/High/Enable']:
+        alarm_state = bool(role_service['/Alarms/High/State'])
+        threshold = role_service[f"/Alarms/High/{'Restore' if alarm_state else 'Active'}"]
+        return int(float(role_service['Level']) > threshold)
+    return 0
+
+
+class _MockTankRole:
+    """Stub tank role with framework alarm definitions."""
+    info = {
+        'alarms': [
+            {'name': '/Alarms/High/State', 'update': _get_alarm_high_state},
+            {'name': '/Alarms/Low/State', 'update': _get_alarm_low_state},
+        ]
+    }
+
     def update_data(self, role_service, sensor_data):
         pass
 
@@ -124,6 +155,10 @@ class MockRoleService(dict):
 
     def disconnect(self):
         self.connected = False
+
+    def update_alarm(self, alarm: dict):
+        alarm_state = alarm['update'](self)
+        self[alarm['name']] = alarm_state
 
     def get_dev_id(self):
         return 'test_dev'
@@ -278,17 +313,105 @@ class TestBTP3HandleManufacturerData(unittest.TestCase):
         self.assertEqual(svc['Status'], 0)
         self.assertTrue(svc.connected)
 
-    # -- Real capture: alarm byte ----------------------------------------
+    # -- Framework alarm evaluation ---------------------------------------
 
-    def test_alarm_byte_zero_from_real_capture(self):
-        """Real capture: all captured payloads have alarm byte '0' (0x30)."""
+    def test_framework_alarm_low_disabled(self):
+        """Framework alarms disabled -> /Alarms/Low/State stays 0."""
         svc = self._enable_sensor('tank', 0, {
-            'FluidType': 1, 'Capacity': 0.0, 'Status': 0})
+            'FluidType': 1, 'Capacity': 0.0, 'Status': 0,
+            '/Alarms/Low/Enable': 0, '/Alarms/Low/Active': 10,
+            '/Alarms/Low/Restore': 15, '/Alarms/Low/State': 0,
+            '/Alarms/High/Enable': 0, '/Alarms/High/Active': 90,
+            '/Alarms/High/Restore': 80, '/Alarms/High/State': 0,
+        })
+        svc.ble_role = _MockTankRole()
         self._patch_enabled()
 
         self.dev.handle_manufacturer_data(BTP3_FRESH_WATER_0PCT)
 
         self.assertEqual(svc['/Alarms/Low/State'], 0)
+
+    def test_framework_alarm_low_triggered(self):
+        """Tank at 5% with low alarm enabled (Active=10) -> alarm fires."""
+        svc = self._enable_sensor('tank', 0, {
+            'FluidType': 1, 'Capacity': 0.0, 'Status': 0,
+            '/Alarms/Low/Enable': 1, '/Alarms/Low/Active': 10,
+            '/Alarms/Low/Restore': 15, '/Alarms/Low/State': 0,
+            '/Alarms/High/Enable': 0, '/Alarms/High/Active': 90,
+            '/Alarms/High/Restore': 80, '/Alarms/High/State': 0,
+        })
+        svc.ble_role = _MockTankRole()
+        self._patch_enabled()
+
+        self.dev.handle_manufacturer_data(b'\x8d\x95i\x00  50000000')
+
+        self.assertEqual(svc['/Alarms/Low/State'], 1)
+
+    def test_framework_alarm_low_not_triggered(self):
+        """Tank at 50% with low alarm enabled (Active=10) -> no alarm."""
+        svc = self._enable_sensor('tank', 0, {
+            'FluidType': 1, 'Capacity': 0.0, 'Status': 0,
+            '/Alarms/Low/Enable': 1, '/Alarms/Low/Active': 10,
+            '/Alarms/Low/Restore': 15, '/Alarms/Low/State': 0,
+            '/Alarms/High/Enable': 0, '/Alarms/High/Active': 90,
+            '/Alarms/High/Restore': 80, '/Alarms/High/State': 0,
+        })
+        svc.ble_role = _MockTankRole()
+        self._patch_enabled()
+
+        self.dev.handle_manufacturer_data(b'\x8d\x95i\x00 500000000')
+
+        self.assertEqual(svc['/Alarms/Low/State'], 0)
+
+    def test_framework_alarm_high_triggered(self):
+        """Tank at 95% with high alarm enabled (Active=90) -> alarm fires."""
+        svc = self._enable_sensor('tank', 0, {
+            'FluidType': 1, 'Capacity': 0.0, 'Status': 0,
+            '/Alarms/Low/Enable': 0, '/Alarms/Low/Active': 10,
+            '/Alarms/Low/Restore': 15, '/Alarms/Low/State': 0,
+            '/Alarms/High/Enable': 1, '/Alarms/High/Active': 90,
+            '/Alarms/High/Restore': 80, '/Alarms/High/State': 0,
+        })
+        svc.ble_role = _MockTankRole()
+        self._patch_enabled()
+
+        self.dev.handle_manufacturer_data(b'\x8d\x95i\x00 950000000')
+
+        self.assertEqual(svc['/Alarms/High/State'], 1)
+
+    def test_framework_alarm_hysteresis(self):
+        """Alarm active: level must rise above Restore (15) to clear."""
+        svc = self._enable_sensor('tank', 0, {
+            'FluidType': 1, 'Capacity': 0.0, 'Status': 0,
+            '/Alarms/Low/Enable': 1, '/Alarms/Low/Active': 10,
+            '/Alarms/Low/Restore': 15, '/Alarms/Low/State': 1,
+            '/Alarms/High/Enable': 0, '/Alarms/High/Active': 90,
+            '/Alarms/High/Restore': 80, '/Alarms/High/State': 0,
+        })
+        svc.ble_role = _MockTankRole()
+        self._patch_enabled()
+
+        self.dev.handle_manufacturer_data(b'\x8d\x95i\x00 120000000')
+
+        self.assertEqual(svc['/Alarms/Low/State'], 1,
+                         "12% is below Restore(15), alarm should stay active")
+
+    def test_hardware_alarm_byte_not_used(self):
+        """Hardware alarm byte '3' no longer sets /Alarms/Low/State directly."""
+        svc = self._enable_sensor('tank', 0, {
+            'FluidType': 1, 'Capacity': 0.0, 'Status': 0,
+            '/Alarms/Low/Enable': 0, '/Alarms/Low/Active': 10,
+            '/Alarms/Low/Restore': 15, '/Alarms/Low/State': 0,
+            '/Alarms/High/Enable': 0, '/Alarms/High/Active': 90,
+            '/Alarms/High/Restore': 80, '/Alarms/High/State': 0,
+        })
+        svc.ble_role = _MockTankRole()
+        self._patch_enabled()
+
+        self.dev.handle_manufacturer_data(b'\x8d\x95i\x00 100000003')
+
+        self.assertEqual(svc['/Alarms/Low/State'], 0,
+                         "alarms disabled, hw byte should not override")
 
     # -- Synthetic: cases not covered by real hardware -------------------
 
@@ -324,15 +447,15 @@ class TestBTP3HandleManufacturerData(unittest.TestCase):
 
         self.assertEqual(svc['Level'], 100)
 
-    def test_alarm_nonzero(self):
-        """Synthetic: alarm byte '3' -> low alarm active."""
+    def test_alarm_null_role_no_crash(self):
+        """Tank with _NullRole (no alarms defined) -> no crash."""
         svc = self._enable_sensor('tank', 0, {
             'FluidType': 1, 'Capacity': 0.0, 'Status': 0})
         self._patch_enabled()
 
-        self.dev.handle_manufacturer_data(b'\x8d\x95i\x00 100000003')
+        self.dev.handle_manufacturer_data(b'\x8d\x95i\x00 500000000')
 
-        self.assertEqual(svc['/Alarms/Low/State'], 1)
+        self.assertEqual(svc['Level'], 50)
 
     def test_temperature_72f(self):
         """Synthetic: sensor 7 (Temp), value '072' (72 degF) -> 22.2 degC."""
@@ -560,6 +683,38 @@ class TestBTP7HandleManufacturerData(unittest.TestCase):
         self.assertAlmostEqual(svc['/Dc/0/Voltage'], 13.0, places=1)
         self.assertEqual(svc['Status'], 0)
         self.assertTrue(svc.connected)
+
+    # -- Framework alarm evaluation (BTP7) --------------------------------
+
+    def test_framework_alarm_low_btp7(self):
+        """BTP7: Fresh at 25% with low alarm enabled (Active=30) -> alarm fires."""
+        svc = self.dev._role_services['tank_00']
+        svc.update({
+            '/Alarms/Low/Enable': 1, '/Alarms/Low/Active': 30,
+            '/Alarms/Low/Restore': 35, '/Alarms/Low/State': 0,
+            '/Alarms/High/Enable': 0, '/Alarms/High/Active': 90,
+            '/Alarms/High/Restore': 80, '/Alarms/High/State': 0,
+        })
+        svc.ble_role = _MockTankRole()
+
+        self.dev.handle_manufacturer_data(BTP7_CAPTURE)
+
+        self.assertEqual(svc['/Alarms/Low/State'], 1)
+
+    def test_framework_alarm_disabled_btp7(self):
+        """BTP7: Fresh at 25% with alarms disabled -> no alarm."""
+        svc = self.dev._role_services['tank_00']
+        svc.update({
+            '/Alarms/Low/Enable': 0, '/Alarms/Low/Active': 30,
+            '/Alarms/Low/Restore': 35, '/Alarms/Low/State': 0,
+            '/Alarms/High/Enable': 0, '/Alarms/High/Active': 90,
+            '/Alarms/High/Restore': 80, '/Alarms/High/State': 0,
+        })
+        svc.ble_role = _MockTankRole()
+
+        self.dev.handle_manufacturer_data(BTP7_CAPTURE)
+
+        self.assertEqual(svc['/Alarms/Low/State'], 0)
 
     # -- Synthetic: edge cases -------------------------------------------
 
