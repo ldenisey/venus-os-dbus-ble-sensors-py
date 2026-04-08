@@ -1,6 +1,7 @@
 from ble_role import BleRole
 from ve_types import *
 import logging
+import time
 
 
 class BleRoleTank(BleRole):
@@ -65,6 +66,7 @@ class BleRoleTank(BleRole):
         flags = config.get('flags', []) if config is not None else []
         self._is_topdown: bool = 'TANK_FLAG_TOPDOWN' in flags
         self._shape_map = None
+        self._alarm_pending: dict[str, float | None] = {}
 
         self.info.update(
             {
@@ -136,6 +138,15 @@ class BleRoleTank(BleRole):
                         }
                     },
                     {
+                        'name': '/Alarms/High/Delay',
+                        'props': {
+                            'type': VE_SN32,
+                            'def': 5,
+                            'min': 0,
+                            'max': 100
+                        }
+                    },
+                    {
                         'name': '/Alarms/Low/Enable',
                         'props': {
                             'type': VE_UN8,
@@ -162,6 +173,15 @@ class BleRoleTank(BleRole):
                             'max': 100
                         }
                     },
+                    {
+                        'name': '/Alarms/Low/Delay',
+                        'props': {
+                            'type': VE_SN32,
+                            'def': 30,
+                            'min': 0,
+                            'max': 100
+                        }
+                    },
                 ],
                 'alarms': [
                     {
@@ -176,6 +196,29 @@ class BleRoleTank(BleRole):
             }
         )
 
+    def _check_alarm_delay(self, key: str, triggered: bool, delay: int) -> bool:
+        """
+        Apply alarm delay logic. Returns True when the alarm should be active.
+
+        When `triggered` is True (level past threshold) and `delay` > 0, the
+        alarm only activates after the level has been past the threshold for
+        `delay` continuous seconds.  If the level recovers before the delay
+        expires, the pending timer is cleared.
+        """
+        now = time.monotonic()
+        if triggered:
+            if delay <= 0:
+                self._alarm_pending.pop(key, None)
+                return True
+            pending_since = self._alarm_pending.get(key)
+            if pending_since is None:
+                self._alarm_pending[key] = now
+                return False
+            return (now - pending_since) >= delay
+        else:
+            self._alarm_pending.pop(key, None)
+            return False
+
     def get_alarm_high_state(self, role_service) -> int:
         """
         Default method to compute tank high level alarm. Can be overridden by overloading info['alarms'] entries in device class.
@@ -185,7 +228,12 @@ class BleRoleTank(BleRole):
             alarm_state = bool(role_service['/Alarms/High/State'])
             alarm_threshold = role_service[f"/Alarms/High/{'Restore' if alarm_state else 'Active'}"]
             tank_level = float(role_service['Level'])
-            return int(tank_level > alarm_threshold)
+            triggered = tank_level > alarm_threshold
+            if alarm_state:
+                return int(triggered)
+            delay = int(role_service['/Alarms/High/Delay'] or 0)
+            svc_id = id(role_service)
+            return int(self._check_alarm_delay(f'high_{svc_id}', triggered, delay))
         else:
             return 0
 
@@ -198,7 +246,12 @@ class BleRoleTank(BleRole):
             alarm_state = bool(role_service['/Alarms/Low/State'])
             alarm_threshold = role_service[f"/Alarms/Low/{'Restore' if alarm_state else 'Active'}"]
             tank_level = float(role_service['Level'])
-            return int(tank_level < alarm_threshold)
+            triggered = tank_level < alarm_threshold
+            if alarm_state:
+                return int(triggered)
+            delay = int(role_service['/Alarms/Low/Delay'] or 0)
+            svc_id = id(role_service)
+            return int(self._check_alarm_delay(f'low_{svc_id}', triggered, delay))
         else:
             return 0
 
