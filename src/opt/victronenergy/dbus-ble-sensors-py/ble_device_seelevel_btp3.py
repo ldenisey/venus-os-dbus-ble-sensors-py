@@ -126,6 +126,7 @@ class BleDeviceSeeLevelBTP3(BleDeviceSeeLevel):
                 'Temperature': temp_c,
                 'Status': 0,
             }
+            role_service.ble_role.update_data(role_service, sensor_data)
             self._update_dbus_data(role_service, sensor_data)
 
         elif role_type == 'battery':
