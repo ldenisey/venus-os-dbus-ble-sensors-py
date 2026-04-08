@@ -43,8 +43,11 @@ class BleDeviceSeeLevelBTP7(BleDeviceSeeLevel):
         for slot, (tank_name, fluid_type) in enumerate(self.TANK_SLOTS):
             role_service = self._create_indexed_role_service(
                 'tank', slot, device_name=f"SeeLevel {tank_name}")
-            if role_service and role_service['FluidType'] == 0:
-                role_service['FluidType'] = fluid_type
+            if role_service:
+                if role_service['FluidType'] == 0:
+                    role_service['FluidType'] = fluid_type
+                if role_service['Capacity'] == 0.2:
+                    role_service['Capacity'] = 0.0
 
         logging.debug(f"{self._plog} initialized {len(self._role_services)} tank slots")
 
