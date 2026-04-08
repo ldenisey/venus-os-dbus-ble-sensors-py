@@ -105,12 +105,19 @@ BTP7_CAPTURE = bytes.fromhex('9104001900006e6e6e6e6e820000')
 # Helpers
 # ===================================================================
 
+class _NullRole:
+    """Stub role whose update_data is a no-op."""
+    def update_data(self, role_service, sensor_data):
+        pass
+
+
 class MockRoleService(dict):
     """Dict-like stand-in for DbusRoleService (no D-Bus required)."""
 
     def __init__(self, defaults=None):
         super().__init__(defaults or {})
         self.connected = False
+        self.ble_role = _NullRole()
 
     def connect(self):
         self.connected = True
@@ -346,6 +353,23 @@ class TestBTP3HandleManufacturerData(unittest.TestCase):
         self.dev.handle_manufacturer_data(b'\x8d\x95i\x070320000000')
 
         self.assertAlmostEqual(svc['Temperature'], 0.0, places=1)
+
+    def test_temperature_offset_applied(self):
+        """Synthetic: temperature offset +2.5 is applied via role update_data."""
+        svc = self._enable_sensor('temperature', 7, {'Status': 0, 'Offset': 2.5})
+        self._patch_enabled()
+
+        class OffsetRole:
+            def update_data(self, role_service, sensor_data):
+                offset = role_service.get('Offset', 0)
+                if offset and 'Temperature' in sensor_data:
+                    sensor_data['Temperature'] = sensor_data['Temperature'] + offset
+
+        svc.ble_role = OffsetRole()
+
+        self.dev.handle_manufacturer_data(b'\x8d\x95i\x070720000000')
+
+        self.assertAlmostEqual(svc['Temperature'], 24.7, places=1)
 
     def test_battery_low_voltage(self):
         """Synthetic: sensor 13, value '108' -> 10.8 V."""
