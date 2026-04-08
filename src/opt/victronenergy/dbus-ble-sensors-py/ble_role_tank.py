@@ -228,7 +228,7 @@ class BleRoleTank(BleRole):
         elif level > 1:
             level = 1
 
-        for i in range(1, len(self._shape_map)):
+        for i in range(1, len(self._shape_map) if self._shape_map else 0):
             if self._shape_map[i][0] >= level:
                 lev_1 = float(self._shape_map[i-1][0])
                 lev_2 = float(self._shape_map[i][0])
