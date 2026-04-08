@@ -27,10 +27,12 @@ class TestBleRoleTank(unittest.TestCase):
             '/Alarms/High/Enable': 0,
             '/Alarms/High/Active': 90,
             '/Alarms/High/Restore': 80,
+            '/Alarms/High/Delay': 0,
             '/Alarms/High/State': 0,
             '/Alarms/Low/Enable': 0,
             '/Alarms/Low/Active': 10,
             '/Alarms/Low/Restore': 15,
+            '/Alarms/Low/Delay': 0,
             '/Alarms/Low/State': 0,
             'Level': 0.0,
             'Remaining': 0.0,
@@ -164,3 +166,58 @@ class TestBleRoleTank(unittest.TestCase):
         self.assertEqual(level, 50)
         self.assertAlmostEqual(remaining, 50.0, places=6)
         self.assertEqual(status, 0)
+
+    def test_alarm_delay_suppresses_immediate_trigger(self):
+        """With delay=10s, first threshold crossing should not fire alarm."""
+        self.dbus_role_service['Level'] = 5
+        self.dbus_role_service['/Alarms/Low/Enable'] = 1
+        self.dbus_role_service['/Alarms/Low/Delay'] = 10
+        self.assertEqual(self.tank.get_alarm_low_state(self.dbus_role_service), 0)
+
+    def test_alarm_delay_fires_after_elapsed(self):
+        """After delay seconds have elapsed, alarm should fire."""
+        import time
+        self.dbus_role_service['Level'] = 5
+        self.dbus_role_service['/Alarms/Low/Enable'] = 1
+        self.dbus_role_service['/Alarms/Low/Delay'] = 0
+        self.assertEqual(self.tank.get_alarm_low_state(self.dbus_role_service), 1)
+
+        tank2 = BleRoleTank(config={'flags': []})
+        tank2.check_configuration()
+        svc_id = id(self.dbus_role_service)
+        tank2._alarm_pending[f'low_{svc_id}'] = time.monotonic() - 15
+        self.dbus_role_service['/Alarms/Low/Delay'] = 10
+        self.assertEqual(tank2.get_alarm_low_state(self.dbus_role_service), 1)
+
+    def test_alarm_delay_clears_on_recovery(self):
+        """If level recovers before delay expires, pending timer is cleared."""
+        import time
+        self.dbus_role_service['Level'] = 5
+        self.dbus_role_service['/Alarms/Low/Enable'] = 1
+        self.dbus_role_service['/Alarms/Low/Delay'] = 30
+        self.tank.get_alarm_low_state(self.dbus_role_service)
+        svc_id = id(self.dbus_role_service)
+        self.assertIn(f'low_{svc_id}', self.tank._alarm_pending)
+
+        self.dbus_role_service['Level'] = 50
+        self.tank.get_alarm_low_state(self.dbus_role_service)
+        self.assertNotIn(f'low_{svc_id}', self.tank._alarm_pending)
+
+    def test_alarm_delay_zero_fires_immediately(self):
+        """Delay=0 means alarm fires on first threshold crossing."""
+        self.dbus_role_service['Level'] = 95
+        self.dbus_role_service['/Alarms/High/Enable'] = 1
+        self.dbus_role_service['/Alarms/High/Delay'] = 0
+        self.assertEqual(self.tank.get_alarm_high_state(self.dbus_role_service), 1)
+
+    def test_alarm_delay_settings_in_role_info(self):
+        """BleRoleTank info includes /Alarms/High/Delay and /Alarms/Low/Delay settings."""
+        setting_names = [s['name'] for s in self.tank.info['settings']]
+        self.assertIn('/Alarms/High/Delay', setting_names)
+        self.assertIn('/Alarms/Low/Delay', setting_names)
+
+    def test_alarm_delay_defaults(self):
+        """Default delay values match GUI mock conventions."""
+        settings_by_name = {s['name']: s for s in self.tank.info['settings']}
+        self.assertEqual(settings_by_name['/Alarms/High/Delay']['props']['def'], 5)
+        self.assertEqual(settings_by_name['/Alarms/Low/Delay']['props']['def'], 30)
