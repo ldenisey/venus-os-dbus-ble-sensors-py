@@ -176,34 +176,42 @@ class DbusBleSensors(object):
                 logging.info(f"{plog} ignoring manufacturer data due to data check")
 
     def _start_scanners(self):
-        """Start passive BleakScanners in a background thread.
+        """Start BLE scanners in background threads.
 
-        We run scanners in a dedicated thread with a standard asyncio event
-        loop because the main thread uses gbulb (GLib-backed asyncio) which
-        is incompatible with dbus-fast's method-call dispatch needed for
-        passive scanning via AdvertisementMonitor1.
+        Passive scanners and nondiscoverable (DuplicateData) scanners run in
+        separate threads, each with its own asyncio event loop.  This is
+        necessary because:
 
-        Each adapter gets a persistent passive scanner.  If a scanner fails
-        to start (e.g. EBUSY because another service is adjusting scan
-        parameters), that adapter retries with exponential backoff."""
+        1. The main thread uses gbulb (GLib-backed asyncio) which is
+           incompatible with dbus-fast's method-call dispatch needed for
+           passive scanning via AdvertisementMonitor1.
+
+        2. If passive scanning's AdvertisementMonitor1 callbacks fail (e.g.
+           method signature mismatch with BlueZ), the dbus-fast connection
+           can block the event loop, preventing nondiscoverable scans from
+           starting.  Separate threads with separate event loops isolate
+           the two scanning modes from each other."""
         self._scan_buffer = []
         self._scan_buffer_lock = threading.Lock()
         self._scanner_stop = threading.Event()
 
-        def _thread_main():
-            policy = asyncio.DefaultEventLoopPolicy()
-            loop = policy.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(asyncio.gather(
-                    self._run_scanners(),
-                    self._run_nondiscoverable_scans(),
-                ))
-            except Exception:
-                logging.exception("Scanner thread error")
+        def _make_thread(coro_factory, name):
+            def _thread_main():
+                asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(coro_factory())
+                except Exception:
+                    logging.exception(f"{name} thread error")
+            t = threading.Thread(target=_thread_main, daemon=True, name=name)
+            t.start()
+            return t
 
-        self._scanner_thread = threading.Thread(target=_thread_main, daemon=True)
-        self._scanner_thread.start()
+        self._scanner_thread = _make_thread(
+            self._run_scanners, "passive-scanner")
+        self._nd_scanner_thread = _make_thread(
+            self._run_nondiscoverable_scans, "nondiscoverable-scanner")
 
     @staticmethod
     async def _power_cycle_adapter(adapter):
@@ -383,8 +391,8 @@ class DbusBleSensors(object):
                 try:
                     nd_results = []
 
-                    def _nd_callback(device, adv_data, _buf=nd_results):
-                        _buf.append((device, adv_data))
+                    def _nd_callback(device, adv_data):
+                        nd_results.append((device, adv_data))
 
                     scanner = bleak.BleakScanner(
                         detection_callback=_nd_callback,
