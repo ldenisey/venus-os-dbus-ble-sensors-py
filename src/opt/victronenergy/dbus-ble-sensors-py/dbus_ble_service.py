@@ -1,8 +1,8 @@
 from __future__ import annotations
 import logging
 import sys
-import os
 import dbus
+from dbus_bus import get_bus
 from dbus_settings_service import DbusSettingsService
 from vedbus import VeDbusService, VeDbusItemImport, VeDbusItemExport
 
@@ -17,7 +17,7 @@ class DbusBleService(object):
 
     def __init__(self):
         DbusBleService._INSTANCE = self
-        self._bus: dbus.Bus = dbus.SessionBus() if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else dbus.SystemBus()
+        self._bus: dbus.bus.BusConnection = get_bus(self._BLE_SERVICENAME)
         self._dbus_settings = DbusSettingsService()
 
         # Dbus local service, if needed

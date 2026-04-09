@@ -11,6 +11,7 @@ from dbus.mainloop.glib import DBusGMainLoop
 from argparse import ArgumentParser
 from ble_device import BleDevice
 from ble_role import BleRole
+from dbus_bus import get_bus
 from dbus_ble_service import DbusBleService
 import bleak
 from bleak.assigned_numbers import AdvertisementDataType
@@ -69,8 +70,7 @@ class DbusBleSensors(object):
     """
 
     def __init__(self):
-        # Get dbus, default is system
-        self._dbus: dbus.Bus = dbus.SessionBus() if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else dbus.SystemBus()
+        self._dbus: dbus.bus.BusConnection = get_bus("org.bluez")
         # Accessor to dbus ble dedicated service (default : com.victronenergy.ble)
         self._dbus_ble_service = DbusBleService()
 
