@@ -138,11 +138,20 @@ class DbusBleSensors(object):
         """Process a single BLE advertisement (called from scan_loop on the main thread)."""
         dev_mac = "".join(device.address.split(':')).lower()
         if dev_mac in self._ignored_mac:
-            return
+            if dev_mac not in self._known_mac:
+                return
+            # Device was previously initialized but ended up in _ignored_mac
+            # (e.g. from an advertisement without ManufacturerData).  Remove
+            # it from _ignored_mac so processing can continue normally.
+            del self._ignored_mac[dev_mac]
+            logging.debug(f"{dev_mac}: recovered known device from ignored list")
 
         plog = f"{dev_mac} - {device.name}:"
         logging.debug(f"{plog} received advertisement {advertisement_data!r}")
         if advertisement_data.manufacturer_data is None or len(advertisement_data.manufacturer_data) < 1:
+            if dev_mac in self._known_mac:
+                # Keep TTL alive — device is still present, just no data update
+                return
             now = time.monotonic()
             if now - self._last_adv_seen.get(dev_mac, 0) >= ADV_LOG_QUIET_PERIOD:
                 logging.info(f"{plog} ignoring, device without manufacturer data")
@@ -211,13 +220,11 @@ class DbusBleSensors(object):
 
         def _make_thread(coro_factory, name):
             def _thread_main():
-                asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
                 try:
-                    loop.run_until_complete(coro_factory())
-                except Exception:
-                    logging.exception(f"{name} thread error")
+                    with asyncio.Runner() as runner:
+                        runner.run(coro_factory())
+                except BaseException:
+                    logging.exception(f"{name} thread died")
             t = threading.Thread(target=_thread_main, daemon=True, name=name)
             t.start()
             return t
@@ -256,6 +263,7 @@ class DbusBleSensors(object):
             logging.warning(f"{adapter}: power-cycle failed: {e}")
         finally:
             bus.disconnect()
+
 
     async def _run_scanners(self):
         """Run persistent BleakScanners with per-adapter state tracking.
@@ -551,6 +559,16 @@ def main():
         )
         handler.setFormatter(logging.Formatter(fmt='%(message)s'))
         SNIF_LOGGER.addHandler(handler)
+
+    # Force immediate process exit on SIGTERM.  Python's default SIGTERM
+    # handler raises SystemExit, which triggers asyncio cleanup that leaves
+    # dbus-fast sockets in a half-closed state.  BlueZ can't detect the dead
+    # client, so stale AdvertisementMonitor registrations persist and block
+    # passive scanning for the next service instance.  Using os._exit()
+    # ensures the OS closes all file descriptors immediately, letting the
+    # D-Bus daemon detect the disconnect and notify BlueZ to clean up.
+    import signal
+    signal.signal(signal.SIGTERM, lambda signum, frame: os._exit(0))
 
     # Init gbulb, configure GLib and integrate asyncio in it
     gbulb.install()
