@@ -65,6 +65,7 @@ class DbusBleSensors(object):
         self._known_mfg_ids: frozenset[int] = frozenset(BleDevice.DEVICE_CLASSES.keys())
         self._last_mfg_data: dict[str, tuple[bytes, float]] = {}
         self._tap_seen_macs: dict[str, float] = {}
+        self._tap_ignored_macs: set[str] = set()
         self._last_tap_rx: float = 0.0
         self._silence_warned: bool = False
         self._tap_thread: threading.Thread | None = None
@@ -131,6 +132,7 @@ class DbusBleSensors(object):
                         logging.info(f"{dev_mac}: ignoring manufacturer {man_id:#06x}, no device class")
                     self._last_adv_seen[dev_mac] = now
                     self._ignored_mac[dev_mac] = True
+                    self._tap_ignored_macs.add(dev_mac)
                     continue
 
                 logging.info(f"{dev_mac}: initializing device with class {device_class}")
@@ -141,6 +143,7 @@ class DbusBleSensors(object):
                             f"{dev_mac}: manufacturer data check failed for "
                             f"{device_class.__name__}, ignoring")
                         self._ignored_mac[dev_mac] = True
+                        self._tap_ignored_macs.add(dev_mac)
                         continue
                     dev_instance.configure(man_data)
                     dev_instance.init()
@@ -149,10 +152,12 @@ class DbusBleSensors(object):
                     logging.info(f"{dev_mac}: device configuration invalid for "
                                  f"{device_class.__name__}: {exc}")
                     self._ignored_mac[dev_mac] = True
+                    self._tap_ignored_macs.add(dev_mac)
                     continue
                 except Exception:
                     logging.exception(f"{dev_mac}: unexpected error during device initialization")
                     self._ignored_mac[dev_mac] = True
+                    self._tap_ignored_macs.add(dev_mac)
                     continue
             else:
                 dev_instance = self._known_mac[dev_mac]
@@ -215,7 +220,8 @@ class DbusBleSensors(object):
         def _tap_thread():
             try:
                 run_tap_loop(tap_sock, _on_advertisement, self._tap_stop,
-                             mfg_filter=known_mfg_ids)
+                             mfg_filter=known_mfg_ids,
+                             ignored_macs=self._tap_ignored_macs)
             except Exception:
                 logging.exception("HCI monitor tap thread died")
 
@@ -242,6 +248,15 @@ class DbusBleSensors(object):
 
         self._known_mac.prune()
         self._ignored_mac.prune()
+
+        # Sync tap-level MAC filter: remove entries that expired from
+        # _ignored_mac or were promoted to _known_mac.
+        stale_ignored = [
+            mac for mac in self._tap_ignored_macs
+            if mac not in self._ignored_mac or mac in self._known_mac
+        ]
+        for mac in stale_ignored:
+            self._tap_ignored_macs.discard(mac)
 
         now = time.monotonic()
 

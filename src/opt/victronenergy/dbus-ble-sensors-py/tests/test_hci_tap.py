@@ -275,6 +275,158 @@ class TestParseMonitorFrame(unittest.TestCase):
         self.assertEqual(results[0].rssi, -68)
 
 
+class TestMacLevelFiltering(unittest.TestCase):
+    """Tests for the ignored_macs MAC-level pre-filter."""
+
+    def test_legacy_ignored_mac_is_dropped(self):
+        mac = "AA:BB:CC:DD:EE:FF"
+        ad_data = _build_mfg_ad(0x0059, b'\x42\x43')
+        body = bytes([1])
+        body += bytes([0x00, 0x01])
+        body += _mac_bytes(mac)
+        body += bytes([len(ad_data)])
+        body += ad_data
+        body += bytes([0xD0])
+
+        ignored = {"aabbccddeeff"}
+        results = _parse_legacy_reports(body, 0, adapter_idx=0, ignored_macs=ignored)
+        self.assertEqual(len(results), 0)
+
+    def test_legacy_non_ignored_mac_passes(self):
+        mac = "AA:BB:CC:DD:EE:FF"
+        ad_data = _build_mfg_ad(0x0059, b'\x42\x43')
+        body = bytes([1])
+        body += bytes([0x00, 0x01])
+        body += _mac_bytes(mac)
+        body += bytes([len(ad_data)])
+        body += ad_data
+        body += bytes([0xD0])
+
+        ignored = {"112233445566"}
+        results = _parse_legacy_reports(body, 0, adapter_idx=0, ignored_macs=ignored)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].mac, "aabbccddeeff")
+
+    def test_legacy_empty_ignored_set_passes_all(self):
+        mac = "AA:BB:CC:DD:EE:FF"
+        ad_data = _build_mfg_ad(0x0059, b'\x42\x43')
+        body = bytes([1])
+        body += bytes([0x00, 0x01])
+        body += _mac_bytes(mac)
+        body += bytes([len(ad_data)])
+        body += ad_data
+        body += bytes([0xD0])
+
+        results = _parse_legacy_reports(body, 0, adapter_idx=0, ignored_macs=set())
+        self.assertEqual(len(results), 1)
+
+    def test_legacy_none_ignored_passes_all(self):
+        mac = "AA:BB:CC:DD:EE:FF"
+        ad_data = _build_mfg_ad(0x0059, b'\x42\x43')
+        body = bytes([1])
+        body += bytes([0x00, 0x01])
+        body += _mac_bytes(mac)
+        body += bytes([len(ad_data)])
+        body += ad_data
+        body += bytes([0xD0])
+
+        results = _parse_legacy_reports(body, 0, adapter_idx=0, ignored_macs=None)
+        self.assertEqual(len(results), 1)
+
+    def test_legacy_multiple_reports_only_ignored_dropped(self):
+        """With 3 reports, only the one whose MAC is in ignored_macs is dropped."""
+        body = bytes([3])
+        macs = ["AA:BB:CC:DD:EE:00", "AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"]
+        for mac in macs:
+            ad_data = _build_mfg_ad(0x0059, b'\x42')
+            body += bytes([0x00, 0x01])
+            body += _mac_bytes(mac)
+            body += bytes([len(ad_data)])
+            body += ad_data
+            body += bytes([0xD0])
+
+        ignored = {"aabbccddee01"}
+        results = _parse_legacy_reports(body, 0, adapter_idx=0, ignored_macs=ignored)
+        self.assertEqual(len(results), 2)
+        result_macs = {r.mac for r in results}
+        self.assertNotIn("aabbccddee01", result_macs)
+        self.assertIn("aabbccddee00", result_macs)
+        self.assertIn("aabbccddee02", result_macs)
+
+    def test_extended_ignored_mac_is_dropped(self):
+        mac = "AA:BB:CC:DD:EE:FF"
+        ad = _build_mfg_ad(0x0059, b'\x01\x02')
+        report = struct.pack("<H", 0x0013)
+        report += bytes([0x01])
+        report += _mac_bytes(mac)
+        report += bytes([0x01, 0x00, 0xFF, 0x7F])
+        report += bytes([0xC4])  # rssi = -60
+        report += struct.pack("<H", 0)
+        report += bytes([0x00])
+        report += bytes(6)
+        report += bytes([len(ad)])
+        report += ad
+        body = bytes([1]) + report
+
+        ignored = {"aabbccddeeff"}
+        results = _parse_extended_reports(body, 0, adapter_idx=0, ignored_macs=ignored)
+        self.assertEqual(len(results), 0)
+
+    def test_extended_non_ignored_mac_passes(self):
+        mac = "AA:BB:CC:DD:EE:FF"
+        ad = _build_mfg_ad(0x0059, b'\x01\x02')
+        report = struct.pack("<H", 0x0013)
+        report += bytes([0x01])
+        report += _mac_bytes(mac)
+        report += bytes([0x01, 0x00, 0xFF, 0x7F])
+        report += bytes([0xC4])
+        report += struct.pack("<H", 0)
+        report += bytes([0x00])
+        report += bytes(6)
+        report += bytes([len(ad)])
+        report += ad
+        body = bytes([1]) + report
+
+        ignored = {"112233445566"}
+        results = _parse_extended_reports(body, 0, adapter_idx=0, ignored_macs=ignored)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].mac, "aabbccddeeff")
+
+    def test_parse_monitor_frame_threads_ignored_macs(self):
+        """Verify ignored_macs flows through parse_monitor_frame to the sub-parser."""
+        mac = "AA:BB:CC:DD:EE:FF"
+        ad_data = _build_mfg_ad(0x0059, b'\x42\x43')
+        hci_event = _build_legacy_hci_event([
+            (0x00, 0x01, _mac_bytes(mac), ad_data, 0xD0),
+        ])
+        frame = _build_monitor_frame(_OP_HCI_EVENT_RX, 0, hci_event)
+
+        results_without = parse_monitor_frame(frame, ignored_macs=None)
+        self.assertEqual(len(results_without), 1)
+
+        results_with = parse_monitor_frame(frame, ignored_macs={"aabbccddeeff"})
+        self.assertEqual(len(results_with), 0)
+
+    def test_ignored_mac_skips_ad_parsing(self):
+        """An ignored MAC should be dropped before _walk_ad_structures runs.
+
+        We verify indirectly: even with manufacturer data that would match,
+        an ignored MAC produces no results.
+        """
+        mac = "AA:BB:CC:DD:EE:FF"
+        ad_data = _build_mfg_ad(0x0059, b'\x42\x43')
+        body = bytes([1])
+        body += bytes([0x00, 0x01])
+        body += _mac_bytes(mac)
+        body += bytes([len(ad_data)])
+        body += ad_data
+        body += bytes([0xD0])
+
+        ignored = {"aabbccddeeff"}
+        results = _parse_legacy_reports(body, 0, adapter_idx=0, ignored_macs=ignored)
+        self.assertEqual(len(results), 0)
+
+
 class TestRunTapLoop(unittest.TestCase):
     def test_stop_event_exits_loop(self):
         """run_tap_loop should exit promptly when stop_event is set."""
