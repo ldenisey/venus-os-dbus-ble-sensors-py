@@ -24,6 +24,7 @@ from hci_advertisement_tap import (
 
 ADV_LOG_QUIET_PERIOD = 1800
 SILENCE_WARNING_SECONDS = 300
+DEDUP_KEEPALIVE_SECONDS = 900  # re-forward identical data every 15 min
 from man_id import MAN_NAMES
 
 SNIF_LOGGER = logging.getLogger("sniffer")
@@ -62,7 +63,7 @@ class DbusBleSensors(object):
         BleDevice.load_classes(os.path.abspath(__file__))
 
         self._known_mfg_ids: frozenset[int] = frozenset(BleDevice.DEVICE_CLASSES.keys())
-        self._last_mfg_data: dict[str, bytes] = {}
+        self._last_mfg_data: dict[str, tuple[bytes, float]] = {}
         self._tap_seen_macs: dict[str, float] = {}
         self._last_tap_rx: float = 0.0
         self._silence_warned: bool = False
@@ -198,14 +199,18 @@ class DbusBleSensors(object):
                 return
             for mfg_id in adv.manufacturer_data:
                 if mfg_id in known_mfg_ids:
-                    self._last_tap_rx = time.monotonic()
+                    now = time.monotonic()
+                    self._last_tap_rx = now
                     self._silence_warned = False
                     mac_lower = "".join(adv.mac.split(':')).lower()
-                    tap_seen[mac_lower] = self._last_tap_rx
+                    tap_seen[mac_lower] = now
                     raw = adv.manufacturer_data[mfg_id]
-                    if last_mfg_data.get(adv.mac) == raw:
-                        return
-                    last_mfg_data[adv.mac] = raw
+                    prev = last_mfg_data.get(adv.mac)
+                    if prev is not None:
+                        prev_data, prev_ts = prev
+                        if prev_data == raw and now - prev_ts < DEDUP_KEEPALIVE_SECONDS:
+                            return
+                    last_mfg_data[adv.mac] = (raw, now)
                     GLib.idle_add(self._glib_process_tap, adv)
                     return
 
