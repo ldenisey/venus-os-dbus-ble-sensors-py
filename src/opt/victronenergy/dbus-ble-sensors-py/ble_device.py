@@ -21,6 +21,7 @@ class BleDevice(object):
     """
 
     MANUFACTURER_ID = None  # To be overloaded in children classes: int, ble manufacturer id
+    CUSTOM_PARSING = False  # Set True in subclasses that override handle_manufacturer_data() and don't use regs
 
     # Dict of devices classes, key is manufacturer id
     DEVICE_CLASSES = {}
@@ -142,9 +143,10 @@ class BleDevice(object):
             if not isinstance(self.info[dict_key], dict):
                 raise ValueError(f"{self._plog} Configuration '{dict_key}' must be a dict")
 
-        for collection_mandatory in ['roles', 'regs']:
-            if self.info[collection_mandatory].__len__() < 1:
-                raise ValueError(f"{self._plog} Configuration '{collection_mandatory}' must have at least one element")
+        if self.info['roles'].__len__() < 1:
+            raise ValueError(f"{self._plog} Configuration 'roles' must have at least one element")
+        if not self.CUSTOM_PARSING and self.info['regs'].__len__() < 1:
+            raise ValueError(f"{self._plog} Configuration 'regs' must have at least one element")
 
         for role_name in self.info['roles'].keys():
             if role_name not in BleRole.ROLE_CLASSES:
@@ -217,6 +219,58 @@ class BleDevice(object):
             # Creating entries in ble service to enable/disable options
             DbusBleService.get().register_role_service(role_service)
         logging.debug(f"{self._plog} initialized")
+
+    def _create_indexed_role_service(self, role_type: str, index: int, device_name: str = None, config: dict = None):
+        """
+        Create a role service for a specific slot index, producing a unique D-Bus
+        service name like com.victronenergy.tank.{dev_prefix}_{mac}_{index:02d}.
+
+        Use this for devices that expose multiple instances of the same role type
+        (e.g. multi-tank monitors). The service is stored in _role_services keyed
+        by '{role_type}_{index:02d}' and registered with DbusBleService.
+
+        Returns the DbusRoleService, or None on failure.
+        """
+        key = f'{role_type}_{index:02d}'
+        if key in self._role_services:
+            return self._role_services[key]
+
+        role_cls = BleRole.get_class(role_type)
+        if role_cls is None:
+            logging.error(f"{self._plog} unknown role type {role_type!r}")
+            return None
+
+        role = role_cls(config or {})
+        try:
+            role.check_configuration()
+        except ValueError as e:
+            logging.error(f"{self._plog} ignoring {role_type} index {index}: {e}")
+            return None
+
+        base_dev_id = self.info['dev_id']
+        self.info['dev_id'] = f"{base_dev_id}_{index:02d}"
+
+        role_service = DbusRoleService(self, role)
+        role_service.load_settings()
+
+        if device_name:
+            role_service['DeviceName'] = device_name
+
+        self._role_services[key] = role_service
+        DbusBleService.get().register_role_service(role_service)
+
+        self.info['dev_id'] = base_dev_id
+        logging.info(f"{self._plog} created indexed {role_type} service [{index:02d}]")
+        return role_service
+
+    def _is_indexed_role_enabled(self, role_type: str, index: int) -> bool:
+        """Check if a specific indexed role service is enabled in the GUI."""
+        key = f'{role_type}_{index:02d}'
+        role_service = self._role_services.get(key)
+        if role_service is None:
+            return False
+        enabled_path = f"/Devices/{role_service.get_dev_id()}_{role_type}/Enabled"
+        return bool(DbusBleService.get()._get_value(enabled_path))
 
     def _load_str(self, reg: dict, manufacturer_data: bytes) -> str:
         # Check there is enough data
