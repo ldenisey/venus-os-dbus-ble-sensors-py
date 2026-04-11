@@ -5,7 +5,6 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), 'ext'))
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), 'ext', 'velib_python'))
 import logging
 from logging.handlers import RotatingFileHandler
-import asyncio
 import dbus
 from dbus.mainloop.glib import DBusGMainLoop
 from argparse import ArgumentParser
@@ -13,84 +12,64 @@ from ble_device import BleDevice
 from ble_role import BleRole
 from dbus_bus import get_bus
 from dbus_ble_service import DbusBleService
-import bleak
-from bleak.assigned_numbers import AdvertisementDataType
-import gbulb
+from gi.repository import GLib
 from logger import setup_logging
 from collections.abc import MutableMapping
 import threading
 import time
 from conf import IGNORED_DEVICES_TIMEOUT, DEVICE_SERVICES_TIMEOUT, PROCESS_VERSION
+from hci_advertisement_tap import (
+    create_tap_socket, run_tap_loop, TappedAdvertisement,
+)
 
-ADV_LOG_QUIET_PERIOD = 1800  # seconds before re-logging a known device's advertisements
+ADV_LOG_QUIET_PERIOD = 1800
+SILENCE_WARNING_SECONDS = 300
 from man_id import MAN_NAMES
 
 SNIF_LOGGER = logging.getLogger("sniffer")
 SNIF_LOGGER.propagate = False
 
-SCANNER_INITIAL_BACKOFF = 2
-SCANNER_MAX_BACKOFF = 60
-SCANNER_MAX_PASSIVE_RETRIES = 5
-SCANNER_ACTIVE_CYCLE_DURATION = 15
-
-# OrPattern tuples for passive scanning via BlueZ AdvertisementMonitor1.
-# Passive scanning avoids calling StartDiscovery, which eliminates scan
-# contention (InProgress errors) when multiple BLE services share the
-# adapter.  Each tuple is (offset, AD_type, value) where AD_type is the
-# BLE AD type code and value is a prefix to match.
-# Requires BlueZ >= 5.56 with --experimental and kernel >= 5.10.
-#
-# Only Flags-based patterns are used here.  Manufacturer-data patterns
-# (AD type 0xFF) crash BlueZ 5.72 / kernel 6.12 with heap corruption
-# (free(): invalid next size).  To catch devices that omit Flags entirely
-# (e.g. Mopeka sensors), a periodic active scan with DuplicateData=True
-# is run alongside the passive scanner — see _run_nondiscoverable_scan().
-PASSIVE_SCAN_OR_PATTERNS = [
-    (0, AdvertisementDataType.FLAGS, bytes([0x02])),
-    (0, AdvertisementDataType.FLAGS, bytes([0x04])),
-    (0, AdvertisementDataType.FLAGS, bytes([0x05])),
-    (0, AdvertisementDataType.FLAGS, bytes([0x06])),
-    (0, AdvertisementDataType.FLAGS, bytes([0x0e])),
-    (0, AdvertisementDataType.FLAGS, bytes([0x1a])),
-    (0, AdvertisementDataType.FLAGS, bytes([0x1e])),
-]
-
-NONDISCOVERABLE_SCAN_INTERVAL = 30
-NONDISCOVERABLE_SCAN_DURATION = 15
 
 class DbusBleSensors(object):
     """
     Main class for the D-bus BLE Sensors python service.
     Extends base C service 'dbus-ble-sensors' to allow community integration of any BLE sensors.
 
+    BLE advertisements are received via an HCI monitor channel tap — a passive
+    read-only socket that sees ALL HCI traffic between the host and every
+    Bluetooth controller (the same mechanism btmon uses).  This bypasses
+    BlueZ's AdvertisementMonitor1 filtering entirely, eliminating the need
+    for Bleak, dbus-fast, or any BlueZ scanning API.
+
     Cf.
     - https://github.com/victronenergy/dbus-ble-sensors/
     - https://github.com/victronenergy/node-red-contrib-victron/blob/master/src/nodes/victron-virtual.js
     - https://github.com/victronenergy/gui-v2/blob/main/data/mock/conf/services/ruuvi-salon.json
-
-    TODO: Handle ve item format using units definition on GetText callbacks ?
     """
 
     def __init__(self):
         self._dbus: dbus.bus.BusConnection = get_bus("org.bluez")
-        # Accessor to dbus ble dedicated service (default : com.victronenergy.ble)
         self._dbus_ble_service = DbusBleService()
 
-        # Initialze BT adapters search
         self._adapters = []
         self._list_adapters()
 
-        # Known device lists
         self._known_mac = DatedDict(ttl=DEVICE_SERVICES_TIMEOUT)
         self._ignored_mac = DatedDict(ttl=IGNORED_DEVICES_TIMEOUT)
         self._last_adv_seen: dict[str, float] = {}
 
-        # Load definition classes
         BleRole.load_classes(os.path.abspath(__file__))
         BleDevice.load_classes(os.path.abspath(__file__))
 
+        self._known_mfg_ids: frozenset[int] = frozenset(BleDevice.DEVICE_CLASSES.keys())
+        self._last_mfg_data: dict[str, bytes] = {}
+        self._tap_seen_macs: dict[str, float] = {}
+        self._last_tap_rx: float = 0.0
+        self._silence_warned: bool = False
+        self._tap_thread: threading.Thread | None = None
+        self._tap_stop = threading.Event()
+
     def _list_adapters(self):
-        # Adding callback for future connections/disconnections
         self._dbus.add_signal_receiver(
             self._on_interfaces_added,
             dbus_interface='org.freedesktop.DBus.ObjectManager',
@@ -102,7 +81,6 @@ class DbusBleSensors(object):
             signal_name='InterfacesRemoved'
         )
 
-        # Initial search for adapters
         object_manager = dbus.Interface(
             self._dbus.get_object('org.bluez', '/'),
             'org.freedesktop.DBus.ObjectManager'
@@ -129,37 +107,19 @@ class DbusBleSensors(object):
             return
         name = path.split('/')[-1]
         if 'org.bluez.Adapter1' in interfaces:
-            # Remove adapter
             self._dbus_ble_service.remove_ble_adapter(name)
             self._adapters.remove(name)
             logging.info(f"{name}: adapter removed")
 
-    def _process_advertisement(self, device, advertisement_data):
-        """Process a single BLE advertisement (called from scan_loop on the main thread)."""
-        dev_mac = "".join(device.address.split(':')).lower()
+    def _process_advertisement(self, dev_mac: str, manufacturer_data: dict[int, bytes]):
+        """Process a single BLE advertisement (called on the GLib main thread)."""
         if dev_mac in self._ignored_mac:
             if dev_mac not in self._known_mac:
                 return
-            # Device was previously initialized but ended up in _ignored_mac
-            # (e.g. from an advertisement without ManufacturerData).  Remove
-            # it from _ignored_mac so processing can continue normally.
             del self._ignored_mac[dev_mac]
             logging.debug(f"{dev_mac}: recovered known device from ignored list")
 
-        plog = f"{dev_mac} - {device.name}:"
-        logging.debug(f"{plog} received advertisement {advertisement_data!r}")
-        if advertisement_data.manufacturer_data is None or len(advertisement_data.manufacturer_data) < 1:
-            if dev_mac in self._known_mac:
-                # Keep TTL alive — device is still present, just no data update
-                return
-            now = time.monotonic()
-            if now - self._last_adv_seen.get(dev_mac, 0) >= ADV_LOG_QUIET_PERIOD:
-                logging.info(f"{plog} ignoring, device without manufacturer data")
-            self._last_adv_seen[dev_mac] = now
-            self._ignored_mac[dev_mac] = True
-            return
-
-        for man_id, man_data in advertisement_data.manufacturer_data.items():
+        for man_id, man_data in manufacturer_data.items():
             if dev_mac not in self._known_mac:
                 self.snif_data(man_id, man_data)
 
@@ -167,21 +127,30 @@ class DbusBleSensors(object):
                 if device_class is None:
                     now = time.monotonic()
                     if now - self._last_adv_seen.get(dev_mac, 0) >= ADV_LOG_QUIET_PERIOD:
-                        logging.info(f"{plog} ignoring data {man_data!r}, no device configuration class for manufacturer {man_id!r}")
+                        logging.info(f"{dev_mac}: ignoring manufacturer {man_id:#06x}, no device class")
                     self._last_adv_seen[dev_mac] = now
                     self._ignored_mac[dev_mac] = True
                     continue
 
-                logging.info(f"{plog} initializing device with class {device_class}")
+                logging.info(f"{dev_mac}: initializing device with class {device_class}")
                 try:
                     dev_instance = device_class(dev_mac)
                     if not dev_instance.check_manufacturer_data(man_data):
-                        raise ValueError(f"{plog} ignoring data {man_data!r}, manufacturer data check failed")
+                        logging.info(
+                            f"{dev_mac}: manufacturer data check failed for "
+                            f"{device_class.__name__}, ignoring")
+                        self._ignored_mac[dev_mac] = True
+                        continue
                     dev_instance.configure(man_data)
                     dev_instance.init()
                     self._known_mac[dev_mac] = dev_instance
-                except Exception as e:
-                    logging.exception(f"{plog} ignoring data {man_data!r}, an error occurred during device initialization:")
+                except ValueError as exc:
+                    logging.info(f"{dev_mac}: device configuration invalid for "
+                                 f"{device_class.__name__}: {exc}")
+                    self._ignored_mac[dev_mac] = True
+                    continue
+                except Exception:
+                    logging.exception(f"{dev_mac}: unexpected error during device initialization")
                     self._ignored_mac[dev_mac] = True
                     continue
             else:
@@ -189,302 +158,118 @@ class DbusBleSensors(object):
 
             now = time.monotonic()
             if now - self._last_adv_seen.get(dev_mac, 0) >= ADV_LOG_QUIET_PERIOD:
-                logging.info(f"{plog} received manufacturer data: {man_data!r}")
+                logging.info(f"{dev_mac}: received manufacturer data: {man_data!r}")
             else:
-                logging.debug(f"{plog} received manufacturer data: {man_data!r}")
+                logging.debug(f"{dev_mac}: received manufacturer data: {man_data!r}")
             self._last_adv_seen[dev_mac] = now
             if dev_instance.check_manufacturer_data(man_data):
                 dev_instance.handle_manufacturer_data(man_data)
             else:
-                logging.info(f"{plog} ignoring manufacturer data due to data check")
+                logging.info(f"{dev_mac}: ignoring manufacturer data due to data check")
 
-    def _start_scanners(self):
-        """Start BLE scanners in background threads.
-
-        Passive scanners and nondiscoverable (DuplicateData) scanners run in
-        separate threads, each with its own asyncio event loop.  This is
-        necessary because:
-
-        1. The main thread uses gbulb (GLib-backed asyncio) which is
-           incompatible with dbus-fast's method-call dispatch needed for
-           passive scanning via AdvertisementMonitor1.
-
-        2. If passive scanning's AdvertisementMonitor1 callbacks fail (e.g.
-           method signature mismatch with BlueZ), the dbus-fast connection
-           can block the event loop, preventing nondiscoverable scans from
-           starting.  Separate threads with separate event loops isolate
-           the two scanning modes from each other."""
-        self._scan_buffer = []
-        self._scan_buffer_lock = threading.Lock()
-        self._scanner_stop = threading.Event()
-
-        def _make_thread(coro_factory, name):
-            def _thread_main():
-                try:
-                    with asyncio.Runner() as runner:
-                        runner.run(coro_factory())
-                except BaseException:
-                    logging.exception(f"{name} thread died")
-            t = threading.Thread(target=_thread_main, daemon=True, name=name)
-            t.start()
-            return t
-
-        self._scanner_thread = _make_thread(
-            self._run_scanners, "passive-scanner")
-        self._nd_scanner_thread = _make_thread(
-            self._run_nondiscoverable_scans, "nondiscoverable-scanner")
-
-    @staticmethod
-    async def _power_cycle_adapter(adapter):
-        """Power-cycle a BlueZ adapter to clear corrupted HCI scan state.
-
-        When the C-based dbus-ble-sensors service uses raw HCI sockets with
-        legacy scan commands (0x200B/0x200C) on a BT 5.x adapter, BlueZ
-        cannot disable the orphaned scan because it sends extended commands
-        (0x2041/0x2042) which the controller rejects (Command Disallowed /
-        EBUSY).  Power-cycling via D-Bus triggers a proper HCI Reset that
-        clears all controller state."""
-        from dbus_fast.aio import MessageBus
-        from dbus_fast import BusType, Variant
-
-        adapter_path = f'/org/bluez/{adapter}'
-        logging.info(f"{adapter}: power-cycling to clear HCI state")
-        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+    def _glib_process_tap(self, adv: TappedAdvertisement):
+        """GLib idle callback — bridges from tap thread to main thread."""
         try:
-            introspection = await bus.introspect('org.bluez', adapter_path)
-            proxy = bus.get_proxy_object('org.bluez', adapter_path, introspection)
-            props = proxy.get_interface('org.freedesktop.DBus.Properties')
-            await props.call_set('org.bluez.Adapter1', 'Powered', Variant('b', False))
-            await asyncio.sleep(1)
-            await props.call_set('org.bluez.Adapter1', 'Powered', Variant('b', True))
-            await asyncio.sleep(2)
-            logging.info(f"{adapter}: power-cycle complete")
-        except Exception as e:
-            logging.warning(f"{adapter}: power-cycle failed: {e}")
-        finally:
-            bus.disconnect()
+            dev_mac = "".join(adv.mac.split(':')).lower()
+            self._process_advertisement(dev_mac, adv.manufacturer_data)
+        except Exception:
+            logging.exception(f"Error processing tap advertisement from {adv.mac}")
+        return False
 
+    def _start_tap(self):
+        """Start the HCI monitor tap in a background thread.
 
-    async def _run_scanners(self):
-        """Run persistent BleakScanners with per-adapter state tracking.
+        The tap uses HCI_CHANNEL_MONITOR which sees ALL adapters (bound to
+        HCI_DEV_NONE) — no need to wait for D-Bus adapter enumeration.
+        """
+        try:
+            tap_sock = create_tap_socket()
+        except OSError as exc:
+            logging.error(f"Cannot open HCI monitor socket: {exc}")
+            logging.error("No advertisement source available — service cannot function")
+            return
 
-        Each adapter starts in passive mode.  On failure, retries with
-        exponential backoff up to MAX_PASSIVE_RETRIES times.  After that,
-        power-cycles the adapter via D-Bus to clear any corrupted HCI scan
-        state (e.g. from the C-based dbus-ble-sensors service using raw HCI
-        sockets with legacy commands on a BT 5.x adapter).  If passive
-        scanning still fails after the power-cycle, falls back to one
-        active scan cycle before returning to passive.
-        Mode transitions are logged at INFO level per adapter."""
-        INITIAL_BACKOFF = SCANNER_INITIAL_BACKOFF
-        MAX_BACKOFF = SCANNER_MAX_BACKOFF
-        MAX_PASSIVE_RETRIES = SCANNER_MAX_PASSIVE_RETRIES
-        ACTIVE_CYCLE_DURATION = SCANNER_ACTIVE_CYCLE_DURATION
+        known_mfg_ids = self._known_mfg_ids
+        last_mfg_data = self._last_mfg_data
+        tap_seen = self._tap_seen_macs
 
-        def _detection_callback(device, adv_data):
-            with self._scan_buffer_lock:
-                self._scan_buffer.append((device, adv_data))
+        def _on_advertisement(adv: TappedAdvertisement):
+            if not adv.manufacturer_data:
+                return
+            for mfg_id in adv.manufacturer_data:
+                if mfg_id in known_mfg_ids:
+                    self._last_tap_rx = time.monotonic()
+                    self._silence_warned = False
+                    mac_lower = "".join(adv.mac.split(':')).lower()
+                    tap_seen[mac_lower] = self._last_tap_rx
+                    raw = adv.manufacturer_data[mfg_id]
+                    if last_mfg_data.get(adv.mac) == raw:
+                        return
+                    last_mfg_data[adv.mac] = raw
+                    GLib.idle_add(self._glib_process_tap, adv)
+                    return
 
-        adapter_state = {}
+        def _tap_thread():
+            try:
+                run_tap_loop(tap_sock, _on_advertisement, self._tap_stop)
+            except Exception:
+                logging.exception("HCI monitor tap thread died")
 
-        def _state(adapter):
-            if adapter not in adapter_state:
-                adapter_state[adapter] = {
-                    'mode': 'passive',
-                    'scanner': None,
-                    'retries': 0,
-                    'backoff': INITIAL_BACKOFF,
-                    'retry_at': 0.0,
-                    'logged_mode': None,
-                    'power_cycled': False,
-                }
-            return adapter_state[adapter]
+        self._tap_stop.clear()
+        t = threading.Thread(target=_tap_thread, daemon=True, name="hci-monitor-tap")
+        t.start()
+        self._tap_thread = t
+        self._last_tap_rx = time.monotonic()
+        logging.info("HCI monitor tap started")
 
-        def _log_mode(adapter, st, reason=''):
-            if st['logged_mode'] != st['mode']:
-                suffix = f' ({reason})' if reason else ''
-                logging.info(f"{adapter}: scanning mode: {st['mode']}{suffix}")
-                st['logged_mode'] = st['mode']
+    def start(self):
+        """Start the service: open the tap immediately, begin pruning timer."""
+        self._start_tap()
+        GLib.timeout_add_seconds(30, self._prune_tick)
 
-        while not self._scanner_stop.is_set():
-            now = asyncio.get_event_loop().time()
+    def _prune_tick(self):
+        """GLib timer callback — prune caches, check tap health."""
+        # Refresh TTLs for devices the tap thread has seen since last tick,
+        # even if their data was deduplicated and not forwarded to _process_advertisement.
+        seen = self._tap_seen_macs
+        for mac in list(seen):
+            if mac in self._known_mac:
+                _ = self._known_mac[mac]  # __getitem__ refreshes TTL
 
-            for adapter in self._adapters:
-                st = _state(adapter)
+        self._known_mac.prune()
+        self._ignored_mac.prune()
 
-                if st['scanner'] is not None:
-                    continue
-                if now < st['retry_at']:
-                    continue
+        now = time.monotonic()
 
-                if st['mode'] == 'passive':
-                    try:
-                        scanner = bleak.BleakScanner(
-                            detection_callback=_detection_callback,
-                            scanning_mode='passive',
-                            bluez=dict(or_patterns=PASSIVE_SCAN_OR_PATTERNS, adapter=adapter),
-                        )
-                        await scanner.start()
-                        st['scanner'] = scanner
-                        st['retries'] = 0
-                        st['backoff'] = INITIAL_BACKOFF
-                        _log_mode(adapter, st)
-                    except Exception as e:
-                        st['retries'] += 1
-                        delay = st['backoff']
-                        st['backoff'] = min(delay * 2, MAX_BACKOFF)
-                        st['retry_at'] = now + delay
+        # Prune stale entries from dedup and log-throttle dicts
+        stale_macs = [
+            mac for mac, ts in self._last_adv_seen.items()
+            if now - ts > DEVICE_SERVICES_TIMEOUT
+        ]
+        for mac in stale_macs:
+            self._last_adv_seen.pop(mac, None)
+            self._last_mfg_data.pop(mac, None)
 
-                        if st['retries'] >= MAX_PASSIVE_RETRIES:
-                            if not st['power_cycled']:
-                                logging.warning(
-                                    f"{adapter}: passive scan failed {st['retries']} times, "
-                                    f"power-cycling adapter to clear HCI state"
-                                )
-                                await self._power_cycle_adapter(adapter)
-                                st['power_cycled'] = True
-                                st['retries'] = 0
-                                st['backoff'] = INITIAL_BACKOFF
-                                st['retry_at'] = 0.0
-                                st['logged_mode'] = None
-                            else:
-                                logging.warning(
-                                    f"{adapter}: passive scan still failing after power-cycle, "
-                                    f"falling back to active for one cycle"
-                                )
-                                st['mode'] = 'active'
-                                st['retry_at'] = 0.0
-                        else:
-                            logging.warning(
-                                f"{adapter}: passive scan start failed ({e}), "
-                                f"retry {st['retries']}/{MAX_PASSIVE_RETRIES} in {delay:.0f}s"
-                            )
+        # Tap thread watchdog: restart if it died
+        if self._tap_thread is not None and not self._tap_thread.is_alive():
+            logging.warning("HCI monitor tap thread is dead — restarting")
+            self._tap_thread = None
+            self._start_tap()
 
-                elif st['mode'] == 'active':
-                    try:
-                        scanner = bleak.BleakScanner(
-                            detection_callback=_detection_callback,
-                            bluez=dict(adapter=adapter),
-                        )
-                        await scanner.start()
-                        _log_mode(adapter, st, reason='fallback')
+        # Silence detection: warn if no matching advertisements for a while
+        if self._last_tap_rx > 0 and now - self._last_tap_rx > SILENCE_WARNING_SECONDS:
+            if not self._silence_warned:
+                logging.warning(
+                    f"No matching advertisements received for "
+                    f"{int(now - self._last_tap_rx)}s — is BLE scanning active?")
+                self._silence_warned = True
 
-                        for _ in range(ACTIVE_CYCLE_DURATION):
-                            if self._scanner_stop.is_set():
-                                break
-                            await asyncio.sleep(1)
-
-                        await scanner.stop()
-                    except bleak.exc.BleakDBusError as e:
-                        if "InProgress" in str(e):
-                            logging.debug(f"{adapter}: active scan InProgress, will retry")
-                        else:
-                            logging.warning(f"{adapter}: active scan error: {e}")
-                    except Exception as e:
-                        logging.warning(f"{adapter}: active scan error: {e}")
-
-                    st['mode'] = 'passive'
-                    st['retries'] = 0
-                    st['backoff'] = INITIAL_BACKOFF
-                    st['retry_at'] = 0.0
-                    st['power_cycled'] = False
-                    logging.info(f"{adapter}: active cycle complete, retrying passive")
-
-            await asyncio.sleep(1)
-
-        for adapter, st in adapter_state.items():
-            if st['scanner'] is not None:
-                try:
-                    await st['scanner'].stop()
-                    logging.info(f"{adapter}: scanner stopped")
-                except Exception:
-                    pass
-
-    async def _run_nondiscoverable_scans(self):
-        """Periodic active scans with DuplicateData=True to detect devices
-        that omit the Flags AD type (e.g. Mopeka sensors advertise only
-        manufacturer data under Nordic's company ID 0x0059 with no Flags).
-
-        These scans run alongside the persistent passive scanners.  If the
-        adapter is busy (InProgress), the scan is silently skipped."""
-        while not self._scanner_stop.is_set():
-            await asyncio.sleep(NONDISCOVERABLE_SCAN_INTERVAL)
-            for adapter in list(self._adapters):
-                try:
-                    nd_results = []
-
-                    def _nd_callback(device, adv_data):
-                        nd_results.append((device, adv_data))
-
-                    scanner = bleak.BleakScanner(
-                        detection_callback=_nd_callback,
-                        bluez=dict(
-                            adapter=adapter,
-                            filters={"DuplicateData": True},
-                        ),
-                    )
-                    await scanner.start()
-                    for _ in range(NONDISCOVERABLE_SCAN_DURATION):
-                        if self._scanner_stop.is_set():
-                            break
-                        await asyncio.sleep(1)
-                    await scanner.stop()
-
-                    with self._scan_buffer_lock:
-                        self._scan_buffer.extend(nd_results)
-                    logging.info(
-                        f"{adapter}: nondiscoverable scan finished "
-                        f"({len(nd_results)} advertisements)"
-                    )
-                except bleak.exc.BleakDBusError as e:
-                    if "InProgress" in str(e):
-                        logging.debug(
-                            f"{adapter}: nondiscoverable scan skipped (InProgress)"
-                        )
-                    else:
-                        logging.warning(
-                            f"{adapter}: nondiscoverable scan error: {e}"
-                        )
-                except Exception as e:
-                    logging.warning(
-                        f"{adapter}: nondiscoverable scan error: {e}"
-                    )
-
-    async def scan_loop(self):
-        DRAIN_INTERVAL = 5
-
-        while True:
-            if len(self._adapters) < 1:
-                logging.warning("Waiting for a bluetooth adapter...")
-                await asyncio.sleep(5)
-                continue
-
-            if not hasattr(self, '_scanner_thread'):
-                self._start_scanners()
-                await asyncio.sleep(DRAIN_INTERVAL)
-
-            with self._scan_buffer_lock:
-                results = self._scan_buffer[:]
-                self._scan_buffer.clear()
-
-            for device, ad_data in results:
-                try:
-                    self._process_advertisement(device, ad_data)
-                except Exception:
-                    logging.exception(f"Error processing advertisement from {device.address}")
-
-            self._known_mac.prune()
-            self._ignored_mac.prune()
-
-            await asyncio.sleep(DRAIN_INTERVAL)
+        return True
 
     def snif_data(self, man_id: int, man_data: bytes):
-        """
-        Snif advertising data for given manufacturer id and data.
-        Used for external sniffer mode.
-        """
         man_name = MAN_NAMES.get(man_id, hex(man_id).upper())
         SNIF_LOGGER.info(f"{man_name!r}: {man_data!r}")
+
 
 class DatedDict(MutableMapping):
     """
@@ -503,7 +288,6 @@ class DatedDict(MutableMapping):
 
     def __getitem__(self, key):
         value, _ = self._store[key]
-        # refresh on read
         self._store[key] = (value, self._now() + self.ttl)
         return value
 
@@ -519,7 +303,7 @@ class DatedDict(MutableMapping):
     def __contains__(self, key):
         contains = key in self._store
         if contains:
-            self[key]   # refresh on check
+            self[key]
         return contains
 
     def prune(self):
@@ -528,7 +312,7 @@ class DatedDict(MutableMapping):
             value, expire_time = self._store[key]
             if expire_time <= now:
                 if getattr(value, 'delete', None):
-                    value.delete()  # Destroy now, don't wait for GC
+                    value.delete()
                 del self._store[key]
 
     def keys(self):
@@ -542,46 +326,31 @@ def main():
     parser.add_argument('--snif', '-s', help='Turn on advertising data sniffer', default=False, action='store_true')
     args = parser.parse_args()
 
-    # Set default logger
     setup_logging(args.debug)
-    if args.debug:
-        # Mute overly verbose libraries
-        logging.getLogger("bleak").setLevel(logging.INFO)
 
-    # Set sniffer logger
     if args.snif:
         handler = RotatingFileHandler(
             "/var/log/dbus-ble-sensors-py/sniffer.log",
-            maxBytes=512 * 1024,  # rotate after 512KB
-            backupCount=0,        # keep 5 rolled files: sniffer.log.1 ... .5
+            maxBytes=512 * 1024,
+            backupCount=0,
             encoding="utf-8",
-            delay=True            # create file only on first emit
+            delay=True
         )
         handler.setFormatter(logging.Formatter(fmt='%(message)s'))
         SNIF_LOGGER.addHandler(handler)
 
-    # Force immediate process exit on SIGTERM.  Python's default SIGTERM
-    # handler raises SystemExit, which triggers asyncio cleanup that leaves
-    # dbus-fast sockets in a half-closed state.  BlueZ can't detect the dead
-    # client, so stale AdvertisementMonitor registrations persist and block
-    # passive scanning for the next service instance.  Using os._exit()
-    # ensures the OS closes all file descriptors immediately, letting the
-    # D-Bus daemon detect the disconnect and notify BlueZ to clean up.
+    # Immediate exit on SIGTERM so the OS closes all file descriptors and
+    # the D-Bus daemon detects the disconnect cleanly.
     import signal
     signal.signal(signal.SIGTERM, lambda signum, frame: os._exit(0))
 
-    # Init gbulb, configure GLib and integrate asyncio in it
-    gbulb.install()
     DBusGMainLoop(set_as_default=True)
-    asyncio.set_event_loop_policy(gbulb.GLibEventLoopPolicy())
 
-    pvac_output = DbusBleSensors()
+    service = DbusBleSensors()
+    service.start()
 
-    mainloop = asyncio.new_event_loop()
-    asyncio.set_event_loop(mainloop)
-    asyncio.get_event_loop().create_task(pvac_output.scan_loop())
     logging.info('Starting service')
-    mainloop.run_forever()
+    GLib.MainLoop().run()
 
 
 if __name__ == "__main__":
