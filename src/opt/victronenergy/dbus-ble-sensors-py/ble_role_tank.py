@@ -60,7 +60,7 @@ class BleRoleTank(BleRole):
     }
 
     def __init__(self, config: dict = None):
-        super().__init__()
+        super().__init__(config)
 
         flags = config.get('flags', []) if config is not None else []
         self._is_topdown: bool = 'TANK_FLAG_TOPDOWN' in flags
