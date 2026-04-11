@@ -1,19 +1,9 @@
 """Tests for dbus_bus.get_bus() connection caching."""
-import sys
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-# Mock dbus before importing dbus_bus
-_mock_dbus = MagicMock()
-_mock_dbus_bus = MagicMock()
-sys.modules.setdefault('dbus', _mock_dbus)
-sys.modules.setdefault('dbus.bus', _mock_dbus_bus)
-
-# Add source directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
-import dbus_bus  # noqa: E402
-import pytest  # noqa: E402
+import dbus_bus
+import pytest
 
 
 @pytest.fixture(autouse=True)
