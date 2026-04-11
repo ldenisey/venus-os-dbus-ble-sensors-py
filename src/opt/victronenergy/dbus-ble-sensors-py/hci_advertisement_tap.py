@@ -73,15 +73,15 @@ class _HciSocketAddress(ctypes.Structure):
 class TappedAdvertisement:
     """One parsed BLE advertisement from the monitor channel."""
     adapter_index: int
-    mac: str  # uppercase colon-separated, e.g. "AA:BB:CC:DD:EE:FF"
+    mac: str  # lowercase no-separator, e.g. "aabbccddeeff"
     address_type: int
     rssi: int
     manufacturer_data: dict[int, bytes] = field(default_factory=dict)
 
 
 def _format_mac(addr_bytes: bytes) -> str:
-    """Convert 6 little-endian address bytes to uppercase colon-separated MAC."""
-    return ":".join(f"{b:02X}" for b in reversed(addr_bytes))
+    """Convert 6 little-endian address bytes to lowercase hex (no separators)."""
+    return addr_bytes[::-1].hex()
 
 
 def create_tap_socket() -> socket.socket:
@@ -119,7 +119,8 @@ def create_tap_socket() -> socket.socket:
     return sock
 
 
-def _walk_ad_structures(data: bytes) -> dict[int, bytes]:
+def _walk_ad_structures(data: bytes,
+                        mfg_filter: frozenset[int] | None = None) -> dict[int, bytes]:
     """Parse AD structures and extract manufacturer-specific data entries.
 
     AD structure format (Bluetooth Core Spec Supplement, Part A):
@@ -130,27 +131,28 @@ def _walk_ad_structures(data: bytes) -> dict[int, bytes]:
     Manufacturer Specific Data (ad_type 0xFF):
         company_id (2 bytes, little-endian)
         payload (remaining bytes)
+
+    When *mfg_filter* is provided, only matching company IDs are included.
     """
     result: dict[int, bytes] = {}
     pos = 0
     end = len(data)
     while pos < end:
-        if pos + 1 > end:
-            break
         ad_len = data[pos]
         pos += 1
         if ad_len == 0 or pos + ad_len > end:
             break
         ad_type = data[pos]
-        ad_payload = data[pos + 1 : pos + ad_len]
+        if ad_type == _AD_TYPE_MANUFACTURER and ad_len >= 3:
+            company = data[pos + 1] | (data[pos + 2] << 8)
+            if mfg_filter is None or company in mfg_filter:
+                result[company] = bytes(data[pos + 3 : pos + ad_len])
         pos += ad_len
-        if ad_type == _AD_TYPE_MANUFACTURER and len(ad_payload) >= 2:
-            company = ad_payload[0] | (ad_payload[1] << 8)
-            result[company] = bytes(ad_payload[2:])
     return result
 
 
-def _parse_legacy_reports(payload: bytes, offset: int, adapter_idx: int) -> list[TappedAdvertisement]:
+def _parse_legacy_reports(payload: bytes, offset: int, adapter_idx: int,
+                          mfg_filter: frozenset[int] | None = None) -> list[TappedAdvertisement]:
     """Parse LE Advertising Report (subevent 0x02).
 
     Per-report layout (Bluetooth Core Spec Vol 4, Part E, §7.7.65.2):
@@ -167,10 +169,9 @@ def _parse_legacy_reports(payload: bytes, offset: int, adapter_idx: int) -> list
     offset += 1
     results: list[TappedAdvertisement] = []
     for _ in range(num):
-        if offset + 10 > len(payload):  # minimum: 1+1+6+1+0+1
+        if offset + 10 > len(payload):
             break
-        # event_type = payload[offset]
-        offset += 1
+        offset += 1  # event_type
         addr_type = payload[offset]
         offset += 1
         addr_bytes = payload[offset : offset + 6]
@@ -185,7 +186,7 @@ def _parse_legacy_reports(payload: bytes, offset: int, adapter_idx: int) -> list
         offset += 1
         rssi = rssi_raw - 256 if rssi_raw > 127 else rssi_raw
 
-        mfg = _walk_ad_structures(ad_data)
+        mfg = _walk_ad_structures(ad_data, mfg_filter)
         if mfg:
             results.append(TappedAdvertisement(
                 adapter_index=adapter_idx,
@@ -197,7 +198,8 @@ def _parse_legacy_reports(payload: bytes, offset: int, adapter_idx: int) -> list
     return results
 
 
-def _parse_extended_reports(payload: bytes, offset: int, adapter_idx: int) -> list[TappedAdvertisement]:
+def _parse_extended_reports(payload: bytes, offset: int, adapter_idx: int,
+                            mfg_filter: frozenset[int] | None = None) -> list[TappedAdvertisement]:
     """Parse LE Extended Advertising Report (subevent 0x0D).
 
     Per-report layout (Bluetooth Core Spec Vol 4, Part E, §7.7.65.13):
@@ -221,9 +223,8 @@ def _parse_extended_reports(payload: bytes, offset: int, adapter_idx: int) -> li
     offset += 1
     results: list[TappedAdvertisement] = []
     for _ in range(num):
-        if offset + 24 > len(payload):  # minimum: 2+1+6+1+1+1+1+1+2+1+6+1 = 24
+        if offset + 24 > len(payload):
             break
-        # event_type (2 bytes): bits 5-6 of low byte = data_status
         event_type_lo = payload[offset]
         offset += 2
         data_status = (event_type_lo >> 5) & 0x03
@@ -231,13 +232,11 @@ def _parse_extended_reports(payload: bytes, offset: int, adapter_idx: int) -> li
         offset += 1
         addr_bytes = payload[offset : offset + 6]
         offset += 6
-        # primary_phy(1) + secondary_phy(1) + advertising_sid(1) + tx_power(1)
-        offset += 4
+        offset += 4  # primary_phy + secondary_phy + advertising_sid + tx_power
         rssi_raw = payload[offset]
         offset += 1
         rssi = rssi_raw - 256 if rssi_raw > 127 else rssi_raw
-        # periodic_adv_interval(2) + direct_address_type(1) + direct_address(6)
-        offset += 9
+        offset += 9  # periodic_adv_interval + direct_address_type + direct_address
         if offset + 1 > len(payload):
             break
         data_len = payload[offset]
@@ -250,7 +249,7 @@ def _parse_extended_reports(payload: bytes, offset: int, adapter_idx: int) -> li
         if data_status != 0:
             continue
 
-        mfg = _walk_ad_structures(ad_data)
+        mfg = _walk_ad_structures(ad_data, mfg_filter)
         if mfg:
             results.append(TappedAdvertisement(
                 adapter_index=adapter_idx,
@@ -262,50 +261,50 @@ def _parse_extended_reports(payload: bytes, offset: int, adapter_idx: int) -> li
     return results
 
 
-def parse_monitor_frame(raw: bytes) -> list[TappedAdvertisement]:
+def parse_monitor_frame(raw: bytes,
+                        mfg_filter: frozenset[int] | None = None) -> list[TappedAdvertisement]:
     """Parse one monitor channel datagram into advertisement(s).
 
     Each datagram has a 6-byte header followed by the HCI payload.
     Only HCI events containing LE Advertising Reports are processed;
     all other traffic is silently discarded.
+
+    When *mfg_filter* is provided, only advertisements containing a
+    matching manufacturer company ID are returned.
     """
-    if len(raw) < _FRAME_HDR_SIZE:
+    if len(raw) < _FRAME_HDR_SIZE + 3:
+        return []
+
+    # Fast-path: check discriminator bytes before unpacking the header.
+    # raw[6] = event_code, raw[8] = subevent (within the HCI payload).
+    if raw[6] != _EVT_LE_META:
         return []
 
     opcode, adapter_idx, payload_len = _FRAME_HDR.unpack_from(raw, 0)
-
     if opcode != _OP_HCI_EVENT_RX:
         return []
 
+    subevent = raw[8]
     payload = raw[_FRAME_HDR_SIZE:]
-    if len(payload) < 2:
-        return []
-
-    event_code = payload[0]
-    # param_total_len = payload[1]  # not needed — we use payload length
-
-    if event_code != _EVT_LE_META:
-        return []
-
-    if len(payload) < 3:
-        return []
-
-    subevent = payload[2]
 
     if subevent == _SUB_ADV_REPORT:
-        return _parse_legacy_reports(payload, 3, adapter_idx)
+        return _parse_legacy_reports(payload, 3, adapter_idx, mfg_filter)
     elif subevent == _SUB_EXT_ADV_REPORT:
-        return _parse_extended_reports(payload, 3, adapter_idx)
+        return _parse_extended_reports(payload, 3, adapter_idx, mfg_filter)
 
     return []
 
 
-def run_tap_loop(sock: socket.socket, callback, stop_event: threading.Event):
+def run_tap_loop(sock: socket.socket, callback, stop_event: threading.Event,
+                 mfg_filter: frozenset[int] | None = None):
     """Read monitor frames and invoke callback for each parsed advertisement.
 
     Blocks until stop_event is set.  The callback receives a single
     TappedAdvertisement argument and is called on the tap thread — the
     caller is responsible for bridging to the appropriate thread.
+
+    When *mfg_filter* is provided, only advertisements with matching
+    manufacturer company IDs are forwarded to the callback.
     """
     while not stop_event.is_set():
         try:
@@ -322,7 +321,7 @@ def run_tap_loop(sock: socket.socket, callback, stop_event: threading.Event):
             break
         if not raw:
             break
-        for adv in parse_monitor_frame(raw):
+        for adv in parse_monitor_frame(raw, mfg_filter):
             try:
                 callback(adv)
             except Exception:

@@ -122,7 +122,7 @@ class TestParseLegacyReports(unittest.TestCase):
         results = _parse_legacy_reports(body, 0, adapter_idx=0)
         self.assertEqual(len(results), 1)
         adv = results[0]
-        self.assertEqual(adv.mac, mac)
+        self.assertEqual(adv.mac, "aabbccddeeff")
         self.assertEqual(adv.address_type, 0x01)
         self.assertEqual(adv.rssi, -48)
         self.assertIn(0x0059, adv.manufacturer_data)
@@ -195,7 +195,7 @@ class TestParseExtendedReports(unittest.TestCase):
         results = _parse_extended_reports(body, 0, adapter_idx=2)
         self.assertEqual(len(results), 1)
         adv = results[0]
-        self.assertEqual(adv.mac, mac)
+        self.assertEqual(adv.mac, "aabbccddeeff")
         self.assertEqual(adv.adapter_index, 2)
         self.assertEqual(adv.rssi, -55)
         self.assertIn(0x0059, adv.manufacturer_data)
@@ -246,7 +246,7 @@ class TestParseMonitorFrame(unittest.TestCase):
 
         results = parse_monitor_frame(frame)
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].mac, mac)
+        self.assertEqual(results[0].mac, "aabbccddeeff")
         self.assertEqual(results[0].manufacturer_data[0x0059], b'\x42\x43')
 
     def test_wrong_opcode_is_ignored(self):
@@ -296,13 +296,13 @@ class TestTappedAdvertisement(unittest.TestCase):
     def test_dataclass_fields(self):
         adv = TappedAdvertisement(
             adapter_index=0,
-            mac="AA:BB:CC:DD:EE:FF",
+            mac="aabbccddeeff",
             address_type=1,
             rssi=-50,
             manufacturer_data={0x0059: b'\x01'},
         )
         self.assertEqual(adv.adapter_index, 0)
-        self.assertEqual(adv.mac, "AA:BB:CC:DD:EE:FF")
+        self.assertEqual(adv.mac, "aabbccddeeff")
         self.assertEqual(adv.rssi, -50)
 
     def test_default_manufacturer_data(self):

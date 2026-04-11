@@ -171,8 +171,7 @@ class DbusBleSensors(object):
     def _glib_process_tap(self, adv: TappedAdvertisement):
         """GLib idle callback — bridges from tap thread to main thread."""
         try:
-            dev_mac = "".join(adv.mac.split(':')).lower()
-            self._process_advertisement(dev_mac, adv.manufacturer_data)
+            self._process_advertisement(adv.mac, adv.manufacturer_data)
         except Exception:
             logging.exception(f"Error processing tap advertisement from {adv.mac}")
         return False
@@ -197,26 +196,26 @@ class DbusBleSensors(object):
         def _on_advertisement(adv: TappedAdvertisement):
             if not adv.manufacturer_data:
                 return
+            now = time.monotonic()
+            self._last_tap_rx = now
+            self._silence_warned = False
+            mac = adv.mac
+            tap_seen[mac] = now
             for mfg_id in adv.manufacturer_data:
-                if mfg_id in known_mfg_ids:
-                    now = time.monotonic()
-                    self._last_tap_rx = now
-                    self._silence_warned = False
-                    mac_lower = "".join(adv.mac.split(':')).lower()
-                    tap_seen[mac_lower] = now
-                    raw = adv.manufacturer_data[mfg_id]
-                    prev = last_mfg_data.get(adv.mac)
-                    if prev is not None:
-                        prev_data, prev_ts = prev
-                        if prev_data == raw and now - prev_ts < DEDUP_KEEPALIVE_SECONDS:
-                            return
-                    last_mfg_data[adv.mac] = (raw, now)
-                    GLib.idle_add(self._glib_process_tap, adv)
-                    return
+                raw = adv.manufacturer_data[mfg_id]
+                prev = last_mfg_data.get(mac)
+                if prev is not None:
+                    prev_data, prev_ts = prev
+                    if prev_data == raw and now - prev_ts < DEDUP_KEEPALIVE_SECONDS:
+                        return
+                last_mfg_data[mac] = (raw, now)
+                GLib.idle_add(self._glib_process_tap, adv)
+                return
 
         def _tap_thread():
             try:
-                run_tap_loop(tap_sock, _on_advertisement, self._tap_stop)
+                run_tap_loop(tap_sock, _on_advertisement, self._tap_stop,
+                             mfg_filter=known_mfg_ids)
             except Exception:
                 logging.exception("HCI monitor tap thread died")
 
