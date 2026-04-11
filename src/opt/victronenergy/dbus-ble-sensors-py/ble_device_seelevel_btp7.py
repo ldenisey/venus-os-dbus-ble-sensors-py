@@ -48,7 +48,7 @@ class BleDeviceSeeLevelBTP7(BleDeviceSeeLevel):
 
         self._create_indexed_role_service(
             'battery', 8, device_name="SeeLevel Voltage",
-            config={'custom_name': 'Voltage'})
+            config={'custom_name': 'SeeLevel Voltage'})
 
         logging.debug(f"{self._plog} initialized {len(self._role_services)} service slots")
 

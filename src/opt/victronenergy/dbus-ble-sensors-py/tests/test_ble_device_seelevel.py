@@ -590,7 +590,7 @@ class TestBTP3ServiceCreation(unittest.TestCase):
 
         self.assertIn('battery_13', self.created)
         self.assertEqual(self.created['battery_13']._device_name, 'SeeLevel Voltage')
-        self.assertEqual(self.configs['battery_13'], {'custom_name': 'Voltage'})
+        self.assertEqual(self.configs['battery_13'], {'custom_name': 'SeeLevel Voltage'})
 
     def test_no_capacity_override_in_config(self):
         """Tank config only carries fluid_type and custom_name — capacity uses
@@ -618,7 +618,7 @@ class TestBTP3ServiceCreation(unittest.TestCase):
         self.assertEqual(self.configs['tank_00'], {'custom_name': 'Fresh Water', 'fluid_type': 1})
         self.assertEqual(self.configs['tank_01'], {'custom_name': 'Toilet Water', 'fluid_type': 5})
         self.assertEqual(self.configs['tank_02'], {'custom_name': 'Wash Water', 'fluid_type': 2})
-        self.assertEqual(self.configs['battery_13'], {'custom_name': 'Voltage'})
+        self.assertEqual(self.configs['battery_13'], {'custom_name': 'SeeLevel Voltage'})
 
 
 # ===================================================================
@@ -686,7 +686,7 @@ class TestBTP7ServiceCreation(unittest.TestCase):
         """Battery service has custom_name but no fluid_type in config."""
         self._init_device()
 
-        self.assertEqual(self.configs.get('battery_08'), {'custom_name': 'Voltage'})
+        self.assertEqual(self.configs.get('battery_08'), {'custom_name': 'SeeLevel Voltage'})
 
     def test_device_names_match_spec(self):
         """Each service gets the correct SeeLevel device name."""
