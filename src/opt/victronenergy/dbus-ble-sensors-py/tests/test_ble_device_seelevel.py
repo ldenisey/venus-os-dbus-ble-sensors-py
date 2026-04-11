@@ -245,16 +245,21 @@ class TestBTP3HandleManufacturerData(unittest.TestCase):
 
     # -- Real BTP3 capture: OPN (disconnected) ---------------------------
 
-    def test_lpg_opn_skipped(self):
-        """Real capture: sensor 3 (LPG), value 'OPN' -> no update."""
-        svc = self._enable_sensor('tank', 3, {
-            'FluidType': 8, 'Capacity': 0.0, 'Status': 0})
+    def test_lpg_opn_no_service_created(self):
+        """Real capture: sensor 3 (LPG), value 'OPN' -> service never created."""
         self._patch_enabled()
+        created = {}
 
+        def mock_create(role_type, index, device_name=None, config=None):
+            svc = _mock_create_service(self.dev, role_type, index,
+                                       device_name=device_name, defaults={})
+            created[f'{role_type}_{index:02d}'] = svc
+            return svc
+
+        self.dev._create_indexed_role_service = mock_create
         self.dev.handle_manufacturer_data(BTP3_LPG_OPEN)
 
-        self.assertNotIn('Level', svc)
-        self.assertFalse(svc.connected)
+        self.assertNotIn('tank_03', created)
 
     # -- Real BTP3 capture: battery voltage ------------------------------
 

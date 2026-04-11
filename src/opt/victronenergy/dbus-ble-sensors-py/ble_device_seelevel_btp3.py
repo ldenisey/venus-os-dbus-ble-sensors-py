@@ -74,6 +74,11 @@ class BleDeviceSeeLevelBTP3(BleDeviceSeeLevel):
         if role_type is None:
             return
 
+        data_str = manufacturer_data[4:7].decode('ascii', errors='ignore').strip()
+
+        if data_str == "OPN":
+            return
+
         key = f'{role_type}_{sensor_num:02d}'
 
         if key not in self._role_services:
@@ -91,10 +96,6 @@ class BleDeviceSeeLevelBTP3(BleDeviceSeeLevel):
         if not self._is_indexed_role_enabled(role_type, sensor_num):
             return
 
-        data_str = manufacturer_data[4:7].decode('ascii', errors='ignore').strip()
-
-        if data_str == "OPN":
-            return
         if data_str == "ERR":
             self._set_error_status(role_service)
             return
