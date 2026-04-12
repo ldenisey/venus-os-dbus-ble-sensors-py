@@ -1,8 +1,8 @@
 from __future__ import annotations
 import logging
 import sys
-import os
 import dbus
+from dbus_bus import get_bus
 from dbus_settings_service import DbusSettingsService
 from vedbus import VeDbusService, VeDbusItemImport, VeDbusItemExport
 
@@ -17,7 +17,7 @@ class DbusBleService(object):
 
     def __init__(self):
         DbusBleService._INSTANCE = self
-        self._bus: dbus.Bus = dbus.SessionBus() if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else dbus.SystemBus()
+        self._bus: dbus.bus.BusConnection = get_bus(self._BLE_SERVICENAME)
         self._dbus_settings = DbusSettingsService()
 
         # Dbus local service, if needed
@@ -137,15 +137,22 @@ class DbusBleService(object):
             self._set_value(f"/Devices/{dev_id}_{role_name}/Name", f"{custom_name_changes['Value']} {role_name}")
         self._dbus_settings.get_item(custom_name_setting_path).eventCallback = set_name_callback
 
-        # Add enable entry
+        # Add enable entry and fire the callback with the persisted value so
+        # that roles already enabled at startup get their D-Bus service
+        # connected immediately (on_enabled_changed is only called on
+        # *changes* by _set_proxy_setting, not for the initial value).
+        enabled_setting_path = f"/Settings/Devices/{dbus_role_service.get_dbus_id()}/Enabled"
         self._set_proxy_setting(
-            f"/Settings/Devices/{dbus_role_service.get_dbus_id()}/Enabled",
+            enabled_setting_path,
             f"/Devices/{dev_id}_{role_name}/Enabled",
             0,
             0,
             1,
             dbus_role_service.on_enabled_changed
         )
+        initial = self._dbus_settings.get_value(enabled_setting_path)
+        if initial:
+            dbus_role_service.on_enabled_changed(initial)
 
     def unregister_role_service(self, dbus_role_service):
         role_name = dbus_role_service.ble_role.NAME
