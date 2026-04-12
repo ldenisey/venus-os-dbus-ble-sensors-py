@@ -18,6 +18,8 @@ Devices currently supported :
 | Mopeka         | Mopeka TD200               | https://mopeka.com/commercial-industry-based-solutions/water/#:~:text=Mopeka%20TD40,%20TD200                   |
 | Ruuvi          | Ruuvi Tag                  | https://ruuvi.com/ruuvitag/                                                                                    |
 | Ruuvi          | Ruuvi Air                  | https://ruuvi.com/air/                                                                                         |
+| Garnet         | SeeLevel 709-BTP3          | https://garnetsensors.com/seelevel-ii-709-bt/                                                                  |
+| Garnet         | SeeLevel 709-BTP7          | https://garnetsensors.com/seelevel-ii-709-bt/                                                                  |
 
 ## Installation
 
