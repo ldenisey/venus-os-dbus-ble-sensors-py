@@ -17,7 +17,7 @@ class BleRoleMeteo(BleRole):
     NAME = 'meteo'
 
     def __init__(self, config: dict = None):
-        super().__init__()
+        super().__init__(config)
 
         self.info.update(
             {

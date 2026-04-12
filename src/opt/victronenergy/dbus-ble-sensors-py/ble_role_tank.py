@@ -1,6 +1,7 @@
 from ble_role import BleRole
 from ve_types import *
 import logging
+import time
 
 
 class BleRoleTank(BleRole):
@@ -24,10 +25,10 @@ class BleRoleTank(BleRole):
     FLUID_TYPES = {
         0: 'Fuel',
         1: 'Fresh water',
-        2: 'Waste water',
+        2: 'Wash water',
         3: 'Live well',
         4: 'Oil',
-        5: 'Black water (sewage)',
+        5: 'Toilet water',
         6: 'Gasoline',
         7: 'Diesel',
         8: 'LPG',
@@ -60,11 +61,14 @@ class BleRoleTank(BleRole):
     }
 
     def __init__(self, config: dict = None):
-        super().__init__()
+        super().__init__(config)
 
         flags = config.get('flags', []) if config is not None else []
         self._is_topdown: bool = 'TANK_FLAG_TOPDOWN' in flags
         self._shape_map = None
+        self._alarm_pending: dict[str, float | None] = {}
+
+        fluid_type_default = config.get('fluid_type', 0) if config else 0
 
         self.info.update(
             {
@@ -85,7 +89,7 @@ class BleRoleTank(BleRole):
                         'name': 'FluidType',
                         'props': {
                             'type': VE_SN32,
-                            'def': 0,
+                            'def': fluid_type_default,
                             'min': 0,
                             'max': self.INT32_MAX - 3
                         }
@@ -136,6 +140,15 @@ class BleRoleTank(BleRole):
                         }
                     },
                     {
+                        'name': '/Alarms/High/Delay',
+                        'props': {
+                            'type': VE_SN32,
+                            'def': 5,
+                            'min': 0,
+                            'max': 100
+                        }
+                    },
+                    {
                         'name': '/Alarms/Low/Enable',
                         'props': {
                             'type': VE_UN8,
@@ -162,6 +175,15 @@ class BleRoleTank(BleRole):
                             'max': 100
                         }
                     },
+                    {
+                        'name': '/Alarms/Low/Delay',
+                        'props': {
+                            'type': VE_SN32,
+                            'def': 30,
+                            'min': 0,
+                            'max': 100
+                        }
+                    },
                 ],
                 'alarms': [
                     {
@@ -176,6 +198,29 @@ class BleRoleTank(BleRole):
             }
         )
 
+    def _check_alarm_delay(self, key: str, triggered: bool, delay: int) -> bool:
+        """
+        Apply alarm delay logic. Returns True when the alarm should be active.
+
+        When `triggered` is True (level past threshold) and `delay` > 0, the
+        alarm only activates after the level has been past the threshold for
+        `delay` continuous seconds.  If the level recovers before the delay
+        expires, the pending timer is cleared.
+        """
+        now = time.monotonic()
+        if triggered:
+            if delay <= 0:
+                self._alarm_pending.pop(key, None)
+                return True
+            pending_since = self._alarm_pending.get(key)
+            if pending_since is None:
+                self._alarm_pending[key] = now
+                return False
+            return (now - pending_since) >= delay
+        else:
+            self._alarm_pending.pop(key, None)
+            return False
+
     def get_alarm_high_state(self, role_service) -> int:
         """
         Default method to compute tank high level alarm. Can be overridden by overloading info['alarms'] entries in device class.
@@ -185,7 +230,12 @@ class BleRoleTank(BleRole):
             alarm_state = bool(role_service['/Alarms/High/State'])
             alarm_threshold = role_service[f"/Alarms/High/{'Restore' if alarm_state else 'Active'}"]
             tank_level = float(role_service['Level'])
-            return int(tank_level > alarm_threshold)
+            triggered = tank_level > alarm_threshold
+            if alarm_state:
+                return int(triggered)
+            delay = int(role_service['/Alarms/High/Delay'] or 0)
+            svc_id = id(role_service)
+            return int(self._check_alarm_delay(f'high_{svc_id}', triggered, delay))
         else:
             return 0
 
@@ -198,7 +248,12 @@ class BleRoleTank(BleRole):
             alarm_state = bool(role_service['/Alarms/Low/State'])
             alarm_threshold = role_service[f"/Alarms/Low/{'Restore' if alarm_state else 'Active'}"]
             tank_level = float(role_service['Level'])
-            return int(tank_level < alarm_threshold)
+            triggered = tank_level < alarm_threshold
+            if alarm_state:
+                return int(triggered)
+            delay = int(role_service['/Alarms/Low/Delay'] or 0)
+            svc_id = id(role_service)
+            return int(self._check_alarm_delay(f'low_{svc_id}', triggered, delay))
         else:
             return 0
 
@@ -228,7 +283,7 @@ class BleRoleTank(BleRole):
         elif level > 1:
             level = 1
 
-        for i in range(1, len(self._shape_map)):
+        for i in range(1, len(self._shape_map) if self._shape_map else 0):
             if self._shape_map[i][0] >= level:
                 lev_1 = float(self._shape_map[i-1][0])
                 lev_2 = float(self._shape_map[i][0])
@@ -240,8 +295,11 @@ class BleRoleTank(BleRole):
         return int(100 * level), level * capacity, 0
 
     def _tank_capacity_changed(self, role_service, new_capacity):
+        raw = role_service['RawValue']
+        if raw is None:
+            return
         (level, remain, status) = self._compute_level(
-            float(role_service['RawValue']),
+            float(raw),
             float(role_service['RawValueEmpty']),
             float(role_service['RawValueFull']),
             float(new_capacity)

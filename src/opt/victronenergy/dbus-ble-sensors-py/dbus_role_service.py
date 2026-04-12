@@ -201,10 +201,11 @@ class DbusRoleService(object):
         return self._dbus_id
 
     def _init_custom_name(self):
+        default_name = getattr(self.ble_role, '_custom_name_default', '')
         self._set_proxy_setting(
             f"/Settings/Devices/{self._dbus_id}/CustomName",
             '/CustomName',
-            '',
+            default_name,
         )
 
     def get_custom_name(self) -> str:
@@ -220,8 +221,8 @@ class DbusRoleService(object):
             f"/Settings/Devices/{self._dbus_id}{name}",
             name,
             props['def'],
-            props['min'],
-            props['max'],
+            props.get('min', 0),
+            props.get('max', 0),
             callback=callback
         )
 
