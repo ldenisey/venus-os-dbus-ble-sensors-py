@@ -1,0 +1,4 @@
+#!/bin/sh
+exec 2>&1
+mkdir -p /var/log/dbus-ble-sensors-py-launcher
+exec multilog t s25000 n4 /var/log/dbus-ble-sensors-py-launcher

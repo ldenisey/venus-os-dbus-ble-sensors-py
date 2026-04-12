@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# daemontools run script for dbus-ble-sensors-py (curl install)
+#
+echo "*** starting dbus-ble-sensors-py ***"
+exec 2>&1
+. /etc/profile.d/profile.sh 2>/dev/null || true
+
+INSTALL_DIR="/data/apps/dbus-ble-sensors-py"
+APP_DIR="$INSTALL_DIR/src/opt/victronenergy/dbus-ble-sensors-py"
+
+get_setting() {
+  dbus-send --print-reply=literal --system --type=method_call \
+  --dest=com.victronenergy.settings "$1" com.victronenergy.BusItem.GetValue |
+  awk '/int32/ { print $NF; exit }'
+}
+
+if ! ls /sys/class/bluetooth/* >/dev/null 2>&1; then
+  echo "Error: No bluetooth device detected, cancelling service launch"
+  svc -d .
+  exit 1
+fi
+
+if [ "$(get_setting /Settings/Services/BleSensors)" != 1 ]; then
+  echo "Error: Bluetooth service deactivated by configuration, cancelling service launch"
+  svc -d .
+  exit 1
+fi
+
+# AdvertisementMonitor1 passive scanning requires bluetoothd with --experimental.
+# Start it if not running; log a note if running without -E.
+if ! pidof bluetoothd > /dev/null 2>&1; then
+  if [ -x /usr/libexec/bluetooth/bluetoothd ]; then
+    echo "Starting bluetoothd with experimental features for passive scanning..."
+    /usr/libexec/bluetooth/bluetoothd -E &
+    sleep 2
+  fi
+elif ! cat /proc/$(pidof bluetoothd)/cmdline 2>/dev/null | tr '\0' ' ' | grep -qE '\-E|--experimental'; then
+  echo "Note: bluetoothd running without --experimental; passive scanning may fall back"
+fi
+
+exec python3 "$APP_DIR/dbus_ble_sensors.py"

@@ -21,6 +21,37 @@ Devices currently supported :
 
 ## Installation
 
+### Quick Install (curl)
+
+Run this one-liner on your Venus OS device (SSH as root):
+
+``` bash
+curl -fsSL https://raw.githubusercontent.com/ldenisey/venus-os-dbus-ble-sensors-py/main/install.sh | bash
+```
+
+This installs to `/data/apps/dbus-ble-sensors-py/` which persists across firmware updates automatically. If an existing opkg installation is detected, it will be cleanly removed and replaced (all device settings are preserved).
+
+To update, re-run the same command. To disable:
+
+``` bash
+bash /data/apps/dbus-ble-sensors-py/disable.sh
+```
+
+To re-enable after disabling or a firmware update:
+
+``` bash
+bash /data/apps/dbus-ble-sensors-py/enable.sh
+```
+
+To fully remove:
+
+``` bash
+bash /data/apps/dbus-ble-sensors-py/disable.sh
+rm -rf /data/apps/dbus-ble-sensors-py
+```
+
+### Alternative: opkg Install
+
 Add the [venus-os-configuration opkg feed](https://github.com/ldenisey/venus-os-configuration/blob/main/docs/VenusOS-Opkg_configuration.md#adding-custom-feed), then :
 ``` bash
 opkg install dbus-ble-sensors-py
