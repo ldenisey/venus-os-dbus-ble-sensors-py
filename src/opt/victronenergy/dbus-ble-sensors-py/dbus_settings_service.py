@@ -1,7 +1,7 @@
 from __future__ import annotations
-import os
 import dbus
 import logging
+from dbus_bus import get_bus
 from vedbus import VeDbusItemImport, VeDbusItemExport
 
 
@@ -17,13 +17,9 @@ class DbusSettingsService(object):
     _SETTINGS_SERVICENAME = 'com.victronenergy.settings'
 
     def __init__(self):
-        self._bus: dbus.Bus = None
+        self._bus: dbus.bus.BusConnection = get_bus(self._SETTINGS_SERVICENAME)
         self._paths = {}
-        if self._bus is None:
-            self._bus = dbus.SessionBus() if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else dbus.SystemBus()
-        # Check settings service exists
         if self._SETTINGS_SERVICENAME not in self._bus.list_names():
-            self._bus = None
             raise Exception(f"Dbus service {self._SETTINGS_SERVICENAME!r} does not exist.")
 
     def get_item(self, path: str, def_value: object = None, min_value: int = 0, max_value: int = 0) -> VeDbusItemImport:

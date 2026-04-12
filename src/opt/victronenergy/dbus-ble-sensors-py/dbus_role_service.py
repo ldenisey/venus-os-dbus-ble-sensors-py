@@ -1,6 +1,6 @@
-import os
 import logging
 import dbus
+from dbus_bus import get_bus
 from dbus_settings_service import DbusSettingsService
 from ble_role import BleRole
 from functools import partial
@@ -14,19 +14,17 @@ class DbusRoleService(object):
     """
 
     def __init__(self, ble_device, ble_role: BleRole):
-        # private=True to allow creation of multiple services in the same app
-        self._bus: dbus.Bus = dbus.SessionBus(
-            private=True) if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else dbus.SystemBus(private=True)
-        self._dbus_settings = DbusSettingsService()
         self._ble_device = ble_device
         self.ble_role = ble_role
+        self._dev_id = self._ble_device.info['dev_id']
+        self._dbus_id = f"{self._dev_id}/{self.ble_role.NAME}"
+        self._service_name = f"com.victronenergy.{self.ble_role.NAME}.{self._dev_id}"
+        self._bus: dbus.bus.BusConnection = get_bus(self._service_name)
+        self._dbus_settings = DbusSettingsService()
         self._dbus_service: VeDbusService = None
-        self._service_name: str = None
         self._dbus_iface = dbus.Interface(
             self._bus.get_object('org.freedesktop.DBus', '/org/freedesktop/DBus'),
             'org.freedesktop.DBus')
-        self._dev_id = self._ble_device.info['dev_id']
-        self._dbus_id = f"{self._dev_id}/{self.ble_role.NAME}"
         self._init_dbus_service()
 
     def is_connected(self) -> bool:
@@ -68,8 +66,6 @@ class DbusRoleService(object):
         return cur_instance
 
     def _init_dbus_service(self):
-        self._service_name = f"com.victronenergy.{self.ble_role.NAME}.{self._dev_id}"
-
         logging.debug(f"{self._ble_device._plog} initializing dbus {self._service_name!r}")
         self._dbus_service = VeDbusService(self._service_name, self._bus, False)
 
@@ -220,8 +216,8 @@ class DbusRoleService(object):
             f"/Settings/Devices/{self._dbus_id}{name}",
             name,
             props['def'],
-            props['min'],
-            props['max'],
+            props.get('min', 0),
+            props.get('max', 0),
             callback=callback
         )
 
