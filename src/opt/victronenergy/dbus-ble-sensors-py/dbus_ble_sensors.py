@@ -418,12 +418,13 @@ class DbusBleSensors(object):
             if name not in self._registered_adapters:
                 self._register_passive_monitor(name)
 
-        # Silence detection
+        # Silence detection: re-register passive monitors if no ads for 5 min
         if self._last_tap_rx > 0 and now - self._last_tap_rx > SILENCE_WARNING_SECONDS:
             if not self._silence_warned:
                 logging.warning(
                     f"No matching advertisements received for "
-                    f"{int(now - self._last_tap_rx)}s")
+                    f"{int(now - self._last_tap_rx)}s — re-registering passive scan")
+                self._registered_adapters.clear()
                 self._silence_warned = True
 
         return True
