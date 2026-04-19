@@ -38,6 +38,13 @@ class DbusSettingsService(object):
     def get_value(self, path) -> object:  # int, float, str, None
         return self.get_item(path).get_value()
 
+    def try_get_value(self, path: str):
+        """Return setting value, or None if the path does not exist."""
+        item = VeDbusItemImport(self._bus, self._SETTINGS_SERVICENAME, path, createsignal=False)
+        if not item.exists:
+            return None
+        return item.get_value()
+
     def set_item(self, path: str, def_value: object = None, min_value: int = 0, max_value: int = 0, silent=False, callback=None) -> VeDbusItemImport:
         busitem = VeDbusItemImport(self._bus, self._SETTINGS_SERVICENAME, path, callback)
         if not busitem.exists or (def_value, min_value, max_value, silent) != busitem._proxy.GetAttributes():

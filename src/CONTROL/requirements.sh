@@ -10,3 +10,6 @@ wget -O "$SCRIPT_DIR/../opt/victronenergy/dbus-ble-sensors-py/ext/velib_python/v
 # Downloading packages
 export SKIP_CYTHON=false; pip3 install bleak --no-deps --target "$SCRIPT_DIR/../opt/victronenergy/dbus-ble-sensors-py/ext/"
 pip3 install gbulb --no-deps --target "$SCRIPT_DIR/../opt/victronenergy/dbus-ble-sensors-py/ext/"
+
+# victron_ble: used by the Orion-TR driver for encrypted advertisement decoding.
+pip3 install victron-ble --no-deps --target "$SCRIPT_DIR/../opt/victronenergy/dbus-ble-sensors-py/ext/"

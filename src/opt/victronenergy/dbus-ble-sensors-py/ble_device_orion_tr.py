@@ -1,0 +1,818 @@
+"""
+Victron Orion-TR Smart (BLE manufacturer ``0x02E1``, product IDs
+``0xA3C0``–``0xA3DF``).
+
+This device is **not** registered in ``BleDevice.DEVICE_CLASSES`` because
+``0x02E1`` is already owned by ``BleDeviceVictronEnergy`` (SolarSense).
+Dispatch is handled explicitly in :mod:`dbus_ble_sensors`.
+
+Compared to the other devices in this service, the Orion-TR has two
+unusual needs:
+
+1. **Encrypted advertisements.** The 16-byte advertisement key is
+   device-specific and is not printed on the unit.  It can only be read
+   from the device itself via a paired GATT session.  We store the key
+   in a *silent* setting under
+   ``/Settings/Services/BleSensors/OrionTr/<mac>/AdvertisementKey`` and
+   kick off :class:`orion_tr_key_provision.OrionKeyProvisioner` when
+   the setting is missing or stale.
+
+2. **``dcdc`` vs ``alternator`` service.** When the unit runs a charger
+   algorithm (bulk/absorption/float/storage) the stock Victron service
+   publishes under ``com.victronenergy.alternator.*`` so the gui-v2
+   *DC Sources* page picks it up.  When the unit is off or in
+   fixed-output mode the service type flips to
+   ``com.victronenergy.dcdc.*``.  This driver switches between the two
+   roles at runtime to stay in parity with ``dbus-victron-orion-tr``.
+"""
+from __future__ import annotations
+
+import datetime
+import json
+import logging
+import os
+import struct
+import subprocess
+import threading
+import time
+from typing import Any, Dict, Optional
+
+import dbus
+
+from ble_device import BleDevice
+from ble_role import BleRole
+from dbus_ble_service import DbusBleService
+from dbus_role_service import DbusRoleService
+from dbus_settings_service import DbusSettingsService
+# The vendored ``victron_ble`` package (see ``ext/victron_ble``) is the
+# reference decoder and matches the layout used by the upstream Victron
+# Energy tooling.  It has been patched to use ``cryptography`` instead of
+# PyCryptodome so it runs on the stock Venus OS image.
+from victron_ble.devices import detect_device_type  # type: ignore
+from victron_ble.exceptions import (  # type: ignore
+    AdvertisementKeyMismatchError,
+)
+
+from orion_tr_gatt import AsyncGATTWriter
+from orion_tr_key_settings import (
+    advertisement_key_setting_path,
+    get_advertisement_key,
+    get_firmware_version,
+    get_preferred_adapter,
+    set_advertisement_key,
+    set_firmware_version,
+    set_preferred_adapter,
+)
+from orion_tr_pin import resolve_pairing_passkey
+from scan_control import pause_scanning, resume_scanning
+from ve_types import VE_UN8
+
+logger = logging.getLogger(__name__)
+
+VICTRON_MANUFACTURER_ID = 0x02E1
+ORION_PRODUCT_ID_MIN = 0xA3C0
+ORION_PRODUCT_ID_MAX = 0xA3DF
+VREG_DEVICE_MODE = 0x0200
+
+# gui-v2 renders alternator units under "DC Sources" based on /ProductId:
+# a value >= 0xA3E0 is treated as "real alternator" and uses
+# PageAlternatorModel.  0xA3F0 matches what the standalone service uses
+# when flipping to alternator mode.
+ALTERNATOR_PRODUCT_ID = 0xA3F0
+
+# Fallback product names for Orion-TR product IDs not (yet) in the
+# vendored victron_ble MODEL_ID_MAPPING.  Sourced from the standalone
+# dbus-victron-orion-tr driver.
+_ORION_PRODUCT_NAMES = {
+    0xA3C0: "Orion-TR Smart 12/12-18A",
+    0xA3C1: "Orion-TR Smart 12/24-10A",
+    0xA3C2: "Orion-TR Smart 12/48-6A",
+    0xA3D0: "Orion-TR Smart 24/12-20A",
+    0xA3D1: "Orion-TR Smart 24/24-12A",
+    0xA3D2: "Orion-TR Smart 24/48-6A",
+    0xA3D5: "Orion-TR Smart 48/24-12A",
+    0xA3D6: "Orion-TR Smart 48/48-6A",
+}
+
+# VE.Direct OperationMode values that indicate charger-style operation.
+_CHARGER_MODES = {3, 4, 5, 6}  # BULK, ABSORPTION, FLOAT, STORAGE
+
+_gatt_writer: Optional[AsyncGATTWriter] = None
+
+# Single in-flight guard for the subprocess provisioner.  ``threading.Lock``
+# is enough — the provisioner thread simply blocks on ``_provision_lock``
+# while the subprocess runs, and ``_provision_busy`` tells the device
+# callback whether it should skip another attempt.
+_provision_lock = threading.Lock()
+_provision_busy = False
+
+# Absolute path to the CLI provisioner so we don't depend on PATH.
+_KEY_CLI_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "orion_tr_key_cli.py")
+
+
+def is_orion_tr_manufacturer_data(manufacturer_data: bytes) -> bool:
+    if len(manufacturer_data) < 4:
+        return False
+    pid = struct.unpack("<H", manufacturer_data[2:4])[0]
+    return ORION_PRODUCT_ID_MIN <= pid <= ORION_PRODUCT_ID_MAX
+
+
+def _shared_bus() -> dbus.Bus:
+    return (
+        dbus.SessionBus()
+        if "DBUS_SESSION_BUS_ADDRESS" in os.environ
+        else dbus.SystemBus()
+    )
+
+
+def _gatt() -> AsyncGATTWriter:
+    global _gatt_writer
+    if _gatt_writer is None:
+        _gatt_writer = AsyncGATTWriter(_shared_bus())
+    return _gatt_writer
+
+
+def _run_key_cli(mac: str, passkey: int,
+                 timeout_s: float = 45.0,
+                 preferred_adapter: Optional[str] = None,
+                 ) -> Optional[Dict[str, Any]]:
+    """Invoke :mod:`orion_tr_key_cli` and return its parsed JSON payload.
+
+    Running in a separate process keeps the provisioning flow isolated
+    from this service's long-lived D-Bus and BlueZ state, which was
+    observed to produce corrupt CCCD writes on the second and later
+    provisioning attempt within the same service lifetime.  The CLI
+    mirrors the known-good reference test harness verbatim.
+
+    Returns a dict with at least ``key`` (32-hex string) and optionally
+    ``firmware`` (raw hex bytes of VREG ``0x0140``), or ``None`` if the
+    subprocess failed.
+    """
+    cmd = [
+        "python3", _KEY_CLI_PATH,
+        mac,
+        "--passkey", str(passkey),
+        "--timeout", str(int(timeout_s)),
+    ]
+    if preferred_adapter:
+        cmd.extend(["--preferred-adapter", preferred_adapter])
+    logger.info("Spawning key-provisioner subprocess: %s", " ".join(cmd))
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s + 15.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("orion key-provisioner subprocess timed out for %s",
+                       mac)
+        return None
+    except Exception:
+        logger.exception("failed to spawn orion key-provisioner subprocess")
+        return None
+
+    if result.returncode != 0:
+        logger.warning("orion key-provisioner subprocess exited %d: %s",
+                       result.returncode, (result.stderr or "").strip())
+        return None
+
+    raw = (result.stdout or "").strip()
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        logger.warning("orion key-provisioner produced non-JSON output: %r",
+                       raw)
+        return None
+
+    key = str(payload.get("key", "")).strip().lower()
+    if len(key) != 32 or any(c not in "0123456789abcdef" for c in key):
+        logger.warning("orion key-provisioner returned invalid key: %r",
+                       key)
+        return None
+    payload["key"] = key
+    return payload
+
+
+def _format_firmware_version(raw_hex: Optional[str]) -> Optional[str]:
+    """Decode VREG ``0x0140`` bytes into a ``"major.minor"`` string.
+
+    Victron product-info firmware registers use hex-BCD encoding: each
+    nibble is a decimal digit, and the low 16 bits are the
+    ``MAJOR.MINOR`` version number.  On a 4-byte value the high byte
+    carries a release-type marker (``0x40`` = Release, ``0x50`` = Beta)
+    which we expose via a trailing ``~beta``/``~dev`` tag when present.
+
+    * 2 bytes LE ``48 01`` → value ``0x0148`` → ``"1.48"``
+    * 4 bytes LE ``10 01 00 40`` → low 16 bits ``0x0110`` → ``"1.10"``
+    * 4 bytes LE ``10 01 00 50`` → ``"1.10~beta"``
+
+    Falls back to the raw hex when the encoding doesn't match so at
+    least something shows in the UI.
+    """
+    if not raw_hex:
+        return None
+    try:
+        blob = bytes.fromhex(raw_hex)
+    except ValueError:
+        return None
+
+    def _bcd_byte(b: int) -> int:
+        return ((b >> 4) & 0xF) * 10 + (b & 0xF)
+
+    def _format_low16(value16: int) -> Optional[str]:
+        if value16 in (0, 0xFFFF):
+            return None
+        major = _bcd_byte((value16 >> 8) & 0xFF)
+        minor = _bcd_byte(value16 & 0xFF)
+        return f"{major}.{minor:02d}"
+
+    if len(blob) == 2:
+        v = int.from_bytes(blob, "little")
+        s = _format_low16(v)
+        if s:
+            return s
+    if len(blob) == 4:
+        v = int.from_bytes(blob, "little")
+        if v in (0, 0xFFFFFFFF):
+            return raw_hex
+        base = _format_low16(v & 0xFFFF)
+        if base is None:
+            return raw_hex
+        kind = (v >> 24) & 0xF0
+        suffix = {
+            0x40: "",      # Release
+            0x50: "~beta",
+            0xF0: "~dev",
+        }.get(kind, "")
+        return base + suffix
+    # Fallback: raw hex so the user can see *something*.
+    return raw_hex
+
+
+def _parse_temperature(raw_hex: Optional[str]) -> Optional[float]:
+    """Decode VREG ``0xEDDB`` (charger temperature) into degrees Celsius.
+
+    The register returns a signed 16-bit LE value in units of 0.01 °C.
+    (Observed values: ``0x0a14`` = 2580 → 25.8 °C — consistent with room
+    temperature.  The Orion-TR uses direct Celsius, not Kelvin.)
+    Returns ``None`` when the value is the invalid sentinel ``0x7FFF``.
+    """
+    if not raw_hex:
+        return None
+    try:
+        blob = bytes.fromhex(raw_hex)
+    except ValueError:
+        return None
+    if len(blob) < 2:
+        return None
+    raw = int.from_bytes(blob[:2], "little", signed=True)
+    if raw == 0x7FFF or raw == -1:
+        return None
+    return round(raw / 100.0, 1)
+
+
+def _format_mac_colons(dev_mac: str) -> str:
+    s = dev_mac.lower().replace(":", "")
+    return ":".join(s[i : i + 2] for i in range(0, 12, 2)).upper()
+
+
+def _bluez_device_name(dev_mac: str) -> Optional[str]:
+    """Return the BlueZ-reported advertised name for ``dev_mac``, if known.
+
+    Searches all adapters for the device (not just hci0) and reads
+    ``org.bluez.Device1.Name``.  Falls back to ``Device1.Alias`` if the
+    name is missing, and to ``None`` if BlueZ does not yet have a record.
+    """
+    mac_suffix = "/dev_" + _format_mac_colons(dev_mac).replace(":", "_")
+    try:
+        bus = _shared_bus()
+        om = dbus.Interface(
+            bus.get_object("org.bluez", "/", introspect=False),
+            "org.freedesktop.DBus.ObjectManager")
+        objects = om.GetManagedObjects()
+        for path in objects:
+            if not str(path).endswith(mac_suffix):
+                continue
+            if "org.bluez.Device1" not in objects[path]:
+                continue
+            obj = bus.get_object("org.bluez", path, introspect=False)
+            props = dbus.Interface(obj, "org.freedesktop.DBus.Properties")
+            for prop in ("Name", "Alias"):
+                try:
+                    val = str(props.Get("org.bluez.Device1", prop))
+                except dbus.DBusException:
+                    continue
+                if val:
+                    return val
+    except Exception:
+        return None
+    return None
+
+
+class BleDeviceOrionTR(BleDevice):
+    """Orion-TR Smart DC-DC / buck-boost on encrypted Victron manufacturer data."""
+
+    @staticmethod
+    def matches_manufacturer_data(manufacturer_data: bytes) -> bool:
+        return is_orion_tr_manufacturer_data(manufacturer_data)
+
+    def __init__(self, dev_mac: str):
+        self._adv_key_hex: Optional[str] = None
+        self._dbus_settings = DbusSettingsService()
+        self._pairing_passkey: int = resolve_pairing_passkey(self._dbus_settings)
+        self._mode_busy = False
+        # Monotonic timestamp of last provisioning kick-off, for backoff.
+        self._last_provision_attempt: float = 0.0
+        # When we see a KeyMismatch we stop trusting the stored key until a
+        # fresh provisioning round writes a new one.  Without this guard we
+        # would re-read the stale key from settings on every advertisement.
+        self._stored_key_invalid = False
+        # YYYY-MM-DD of the last successful daily refresh; drives the
+        # "once per morning when in range" GATT read.
+        self._last_daily_refresh_date: Optional[str] = None
+        self._current_role_name: Optional[str] = None
+        super().__init__(dev_mac)
+
+    # ------------------------------------------------------------------
+    # Device configuration
+    # ------------------------------------------------------------------
+
+    def configure(self, manufacturer_data: bytes):
+        pid = struct.unpack("<H", manufacturer_data[2:4])[0]
+        self._adv_key_hex = get_advertisement_key(self._dbus_settings,
+                                                  self.info["dev_mac"])
+        # Base ``_load_configuration`` re-reads ``self.MANUFACTURER_ID`` and
+        # overwrites ``info["manufacturer_id"]`` from it.  The class-level
+        # ``MANUFACTURER_ID`` is intentionally ``None`` (so the autoloader
+        # leaves 0x02E1 to ``BleDeviceVictronEnergy`` / SolarSense); shadow
+        # it via an instance attribute so the base validation still passes.
+        self.MANUFACTURER_ID = VICTRON_MANUFACTURER_ID
+        # Prefer the name the device actually advertises (e.g.
+        # ``"Orion Smart HQ20326VVVJ"``) over a hard-coded label so the
+        # gui-v2 Settings → Devices row matches what the user sees on
+        # their unit.  Falls back to ``Orion-TR Smart`` when BlueZ has
+        # not surfaced a name yet (e.g. first pass before bonding).
+        adv_name = _bluez_device_name(self.info["dev_mac"])
+        product_name = adv_name or "Orion-TR Smart"
+        device_name_base = adv_name or "Orion-TR"
+        # Firmware version: cached from a prior GATT read, falls back to
+        # the placeholder the base class expects if we haven't paired yet.
+        firmware_raw = get_firmware_version(self._dbus_settings,
+                                            self.info["dev_mac"])
+        firmware_version = _format_firmware_version(firmware_raw) or "1.0.0"
+        self.info.update(
+            {
+                "manufacturer_id": VICTRON_MANUFACTURER_ID,
+                "product_id": pid,
+                "product_name": product_name,
+                "device_name": device_name_base,
+                "dev_prefix": "orion_tr",
+                "firmware_version": firmware_version,
+                # Start in dcdc; flip happens after the first successful decode.
+                "roles": {"dcdc": {}},
+                "regs": [
+                    {
+                        "name": "_orion_placeholder",
+                        "type": VE_UN8,
+                        "offset": 0,
+                        "roles": [None],
+                    }
+                ],
+                "settings": [],
+                "alarms": [],
+            }
+        )
+        self._current_role_name = "dcdc"
+
+    def init(self):
+        super().init()
+        # Seed CustomName from the BLE-advertised name so the device
+        # list shows the user's own label (e.g. "24v Front Bay") instead
+        # of the long model spec.  Only set if the user hasn't already
+        # chosen a custom name via the UI.
+        adv_name = _bluez_device_name(self.info["dev_mac"])
+        if adv_name:
+            for role_service in self._role_services.values():
+                current = role_service["/CustomName"]
+                if not current:
+                    role_service["/CustomName"] = adv_name
+
+    def check_manufacturer_data(self, manufacturer_data: bytes) -> bool:
+        return self.matches_manufacturer_data(manufacturer_data)
+
+    # ------------------------------------------------------------------
+    # Main advertisement handler
+    # ------------------------------------------------------------------
+
+    def handle_manufacturer_data(self, manufacturer_data: bytes):
+        if not DbusBleService.get().is_device_enabled(self.info):
+            return
+
+        if self._stored_key_invalid:
+            # Waiting on a re-provision; avoid decoding with a known-bad key.
+            self._maybe_provision_key()
+            return
+
+        key = self._adv_key_hex or get_advertisement_key(
+            self._dbus_settings, self.info["dev_mac"])
+        if key:
+            self._adv_key_hex = key
+
+        if not key:
+            # First time we see this device — kick off provisioning once;
+            # subsequent advertisements will decode normally as soon as the
+            # key has been written to settings.
+            self._maybe_provision_key()
+            return
+
+        try:
+            parsed = self._decode_advertisement(key, manufacturer_data)
+        except AdvertisementKeyMismatchError:
+            logger.warning(
+                "%s: advertisement decrypt failed (key mismatch) — "
+                "re-reading VREG 0xEC65",
+                self._plog,
+            )
+            self._stored_key_invalid = True
+            self._adv_key_hex = None
+            self._maybe_provision_key()
+            return
+        except Exception:
+            logger.exception("%s: Orion advertisement decode error",
+                             self._plog)
+            return
+
+        if parsed is None:
+            return
+
+        self._ensure_role_for_state(int(parsed["device_state"]))
+        self._publish(parsed)
+
+        # Receiving an advertisement means the unit is in range right
+        # now — good moment to piggyback an opportunistic firmware refresh
+        # if we're in the morning window and haven't done it today.
+        self._maybe_daily_refresh()
+
+    @staticmethod
+    def _decode_advertisement(key_hex: str, manufacturer_data: bytes):
+        """Decrypt + parse a Victron DC-DC advertisement via ``victron_ble``.
+
+        Returns a small dict with the same shape the rest of the driver
+        expects so the callers can stay agnostic of the ``victron_ble``
+        ``DeviceData`` objects.
+        """
+        device_cls = detect_device_type(manufacturer_data)
+        if device_cls is None:
+            return None
+        parser = device_cls(key_hex)
+        parsed = parser.parse(manufacturer_data)
+
+        charge_state = parsed.get_charge_state()
+        charger_error = parsed.get_charger_error()
+        off_reason = parsed.get_off_reason()
+
+        # victron_ble's model-id table may not cover all Orion-TR product
+        # IDs (e.g. 0xA3D5 48V models).  Fall back to our own table.
+        model_name = parsed.get_model_name()
+        if model_name and model_name.startswith("<Unknown"):
+            pid = struct.unpack("<H", manufacturer_data[2:4])[0]
+            model_name = _ORION_PRODUCT_NAMES.get(pid, model_name)
+
+        return {
+            "device_state": int(charge_state.value) if charge_state is not None else 0,
+            "charger_error": int(charger_error.value) if charger_error is not None else 0,
+            "input_voltage": parsed.get_input_voltage(),
+            "output_voltage": parsed.get_output_voltage(),
+            "off_reason": int(off_reason.value) if off_reason is not None else 0,
+            "model_name": model_name,
+        }
+
+    # ------------------------------------------------------------------
+    # Key provisioning lifecycle
+    # ------------------------------------------------------------------
+
+    # Minimum time between provisioning attempts when the previous one
+    # did not deliver a key.  Pairing + GATT + timeout can run ~45 s so a
+    # tight loop would lock out the adapter.
+    _PROVISION_BACKOFF_SECS = 180.0
+
+    def _maybe_provision_key(self) -> None:
+        global _provision_busy
+        if _provision_busy:
+            return
+        now = time.monotonic()
+        since_last = now - self._last_provision_attempt
+        if (self._last_provision_attempt > 0
+                and since_last < self._PROVISION_BACKOFF_SECS):
+            return
+
+        self._last_provision_attempt = now
+        mac_colon = _format_mac_colons(self.info["dev_mac"])
+        logger.info(
+            "%s: no advertisement key cached — spawning subprocess to "
+            "read VREG 0xEC65",
+            self._plog,
+        )
+
+        # Yield hci0 to the provisioner subprocess so BleakScanner and
+        # the mode-write path don't step on its GATT burst.  Released in
+        # the worker thread regardless of outcome.
+        pause_scanning("orion-tr key provisioning")
+        _provision_busy = True
+
+        # Check if we have a preferred adapter from a prior successful connect
+        pref_adapter = get_preferred_adapter(self._dbus_settings,
+                                             self.info["dev_mac"])
+
+        def worker():
+            global _provision_busy
+            try:
+                with _provision_lock:
+                    payload = _run_key_cli(mac_colon,
+                                           self._pairing_passkey,
+                                           preferred_adapter=pref_adapter)
+                if not payload:
+                    logger.warning(
+                        "%s: key provisioning did not produce a 16-byte "
+                        "key; will retry after backoff",
+                        self._plog)
+                    return
+                self._persist_provisioning_result(payload)
+            finally:
+                _provision_busy = False
+                resume_scanning("orion-tr key provisioning")
+
+        threading.Thread(
+            target=worker, name=f"orion-tr-keyprov-{mac_colon}",
+            daemon=True).start()
+
+    def _persist_provisioning_result(self, payload: Dict[str, Any]) -> None:
+        """Write key + firmware from a CLI payload into settings + info."""
+        key_hex = payload.get("key")
+        if key_hex:
+            try:
+                set_advertisement_key(self._dbus_settings,
+                                      self.info["dev_mac"], key_hex)
+                self._adv_key_hex = key_hex
+                self._stored_key_invalid = False
+                logger.info(
+                    "%s: advertisement key stored at %s",
+                    self._plog,
+                    advertisement_key_setting_path(
+                        self.info["dev_mac"]))
+            except Exception:
+                logger.exception(
+                    "%s: failed to persist advertisement key", self._plog)
+
+        firmware_raw = payload.get("firmware")
+        if firmware_raw:
+            try:
+                set_firmware_version(self._dbus_settings,
+                                     self.info["dev_mac"], firmware_raw)
+                pretty = _format_firmware_version(firmware_raw) or firmware_raw
+                self.info["firmware_version"] = pretty
+                for role_service in self._role_services.values():
+                    try:
+                        role_service["/FirmwareVersion"] = pretty
+                    except Exception:
+                        pass
+                logger.info("%s: firmware version %s recorded",
+                            self._plog, pretty)
+            except Exception:
+                logger.exception(
+                    "%s: failed to persist firmware version", self._plog)
+
+        hw_version = payload.get("hardware_version")
+        if hw_version:
+            try:
+                self.info["hardware_version"] = hw_version
+                for role_service in self._role_services.values():
+                    try:
+                        role_service["/HardwareVersion"] = hw_version
+                    except Exception:
+                        pass
+                logger.info("%s: hardware version %s recorded",
+                            self._plog, hw_version)
+            except Exception:
+                logger.exception(
+                    "%s: failed to set hardware version", self._plog)
+
+        temperature_raw = payload.get("temperature")
+        if temperature_raw:
+            try:
+                temp_c = _parse_temperature(temperature_raw)
+                if temp_c is not None:
+                    for role_service in self._role_services.values():
+                        try:
+                            role_service["/Dc/0/Temperature"] = temp_c
+                        except Exception:
+                            pass
+                    logger.info("%s: temperature %.1f °C recorded",
+                                self._plog, temp_c)
+            except Exception:
+                logger.exception(
+                    "%s: failed to parse temperature", self._plog)
+
+        adapter = payload.get("adapter")
+        if adapter:
+            try:
+                set_preferred_adapter(self._dbus_settings,
+                                     self.info["dev_mac"], adapter)
+            except Exception:
+                logger.exception(
+                    "%s: failed to store preferred adapter", self._plog)
+
+    # ------------------------------------------------------------------
+    # Daily early-morning refresh
+    # ------------------------------------------------------------------
+
+    # Hour window (local time, 24h) during which we allow an opportunistic
+    # pair-and-refresh.  The device must send an advertisement first — we
+    # only act if it's in range, and at most once per calendar day.
+    _DAILY_REFRESH_HOUR_MIN = 3
+    _DAILY_REFRESH_HOUR_MAX = 5
+
+    def _maybe_daily_refresh(self) -> None:
+        global _provision_busy
+        # Only if we already have a valid stored key — we never kick off
+        # a daily refresh on a device we haven't successfully provisioned
+        # yet; that path is handled by the key-missing logic above.
+        if not self._adv_key_hex:
+            return
+        if _provision_busy:
+            return
+        now = datetime.datetime.now()
+        if not (self._DAILY_REFRESH_HOUR_MIN <= now.hour
+                <= self._DAILY_REFRESH_HOUR_MAX):
+            return
+        today = now.strftime("%Y-%m-%d")
+        if self._last_daily_refresh_date == today:
+            return
+
+        # Mark attempted *before* kicking off so a repeating advert burst
+        # during the window doesn't queue multiple refreshes.
+        self._last_daily_refresh_date = today
+        mac_colon = _format_mac_colons(self.info["dev_mac"])
+        logger.info(
+            "%s: daily morning refresh — reading firmware via GATT",
+            self._plog)
+
+        pref_adapter = get_preferred_adapter(self._dbus_settings,
+                                             self.info["dev_mac"])
+        pause_scanning("orion-tr daily refresh")
+        _provision_busy = True
+
+        def worker():
+            global _provision_busy
+            try:
+                with _provision_lock:
+                    payload = _run_key_cli(mac_colon,
+                                           self._pairing_passkey,
+                                           preferred_adapter=pref_adapter)
+                if not payload:
+                    logger.warning(
+                        "%s: daily refresh did not produce a payload",
+                        self._plog)
+                    # Don't clobber _last_daily_refresh_date — we already
+                    # set it; the next retry will be tomorrow.  If that's
+                    # too strict we can wire a backoff here later.
+                    return
+                self._persist_provisioning_result(payload)
+            finally:
+                _provision_busy = False
+                resume_scanning("orion-tr daily refresh")
+
+        threading.Thread(
+            target=worker, name=f"orion-tr-daily-{mac_colon}",
+            daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Publishing decoded values
+    # ------------------------------------------------------------------
+
+    def _publish(self, parsed) -> None:
+        for role_service in list(self._role_services.values()):
+            ble_svc = DbusBleService.get()
+            if not ble_svc.is_device_role_enabled(
+                    self.info, role_service.ble_role.NAME):
+                continue
+
+            st = int(parsed["device_state"])
+            if parsed.get("input_voltage") is not None:
+                role_service["/Dc/In/V"] = parsed["input_voltage"]
+            if parsed.get("output_voltage") is not None:
+                role_service["/Dc/0/Voltage"] = parsed["output_voltage"]
+
+            # ProductName = model spec from victron_ble's product-id table.
+            model = parsed.get("model_name")
+            if model and not model.startswith("<Unknown"):
+                role_service["/ProductName"] = model
+            role_service["/State"] = st
+            role_service["/ErrorCode"] = int(parsed["charger_error"])
+            role_service["/DeviceOffReason"] = int(parsed["off_reason"])
+
+            # Keep /Mode in sync with the inferred mode, unless a write is
+            # pending against the device.
+            if not self._mode_busy:
+                role_service["/Mode"] = 4 if st == 0 else 1
+
+            # Force /ProductId to match the active service type.  gui-v2
+            # keys its layout off /ProductId for alternator services.
+            if role_service.ble_role.NAME == "alternator":
+                role_service["/ProductId"] = ALTERNATOR_PRODUCT_ID
+            else:
+                role_service["/ProductId"] = self.info["product_id"]
+
+            role_service.connect()
+
+    # ------------------------------------------------------------------
+    # dcdc ↔ alternator flip
+    # ------------------------------------------------------------------
+
+    def _ensure_role_for_state(self, device_state: int) -> None:
+        needed = "alternator" if device_state in _CHARGER_MODES else "dcdc"
+        if needed == self._current_role_name:
+            return
+        logger.info("%s: device state %d — switching role from %r to %r",
+                    self._plog, device_state,
+                    self._current_role_name, needed)
+        self._swap_role(needed)
+
+    def _swap_role(self, new_role_name: str) -> None:
+        # Tear down every existing role.  There should only be one at a
+        # time for an Orion-TR, but be defensive.
+        for name, role_service in list(self._role_services.items()):
+            try:
+                role_service.disconnect()
+            except Exception:
+                logger.exception("%s: disconnect failed for role %r",
+                                 self._plog, name)
+            try:
+                DbusBleService.get().unregister_role_service(role_service)
+            except Exception:
+                logger.exception("%s: unregister failed for role %r",
+                                 self._plog, name)
+        self._role_services.clear()
+
+        # Register the new role
+        role_cls = BleRole.get_class(new_role_name)
+        if role_cls is None:
+            logger.error("%s: role %r not registered — keeping previous",
+                         self._plog, new_role_name)
+            return
+        role = role_cls({})
+        try:
+            role.check_configuration()
+        except ValueError:
+            logger.exception("%s: role %r configuration invalid",
+                             self._plog, new_role_name)
+            return
+        role_service = DbusRoleService(self, role)
+        role_service.load_settings()
+        self._role_services[new_role_name] = role_service
+        DbusBleService.get().register_role_service(role_service)
+        self._current_role_name = new_role_name
+        self.info["roles"] = {new_role_name: {}}
+
+    # ------------------------------------------------------------------
+    # Mode write (GATT)
+    # ------------------------------------------------------------------
+
+    def _orion_on_mode_write(self,
+                             role_service: DbusRoleService,
+                             value: int) -> bool:
+        if value not in (1, 4):
+            return False
+        writer = _gatt()
+        if writer.busy:
+            logger.warning("%s: GATT writer busy", self._plog)
+            return False
+
+        self._mode_busy = True
+        mac = _format_mac_colons(self.info["dev_mac"])
+        mode_byte = 4 if value == 4 else 1
+
+        # The mode-write path pairs, connects, writes VREG 0x0200 and
+        # disconnects.  Like the key-provisioner it needs the adapter to
+        # itself, so pause the scan loop for the duration.
+        pause_scanning("orion-tr /Mode write")
+
+        def on_done(success: bool):
+            try:
+                self._mode_busy = False
+                if not success:
+                    logger.error("%s: GATT mode write failed", self._plog)
+            finally:
+                resume_scanning("orion-tr /Mode write")
+
+        writer.write_register(
+            mac,
+            self._pairing_passkey,
+            VREG_DEVICE_MODE,
+            bytes([mode_byte]),
+            on_done=on_done,
+        )
+        return True

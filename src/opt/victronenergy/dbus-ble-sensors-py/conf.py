@@ -11,3 +11,6 @@ DEVICE_SERVICES_TIMEOUT = 1800  # 30 min
 SCAN_TIMEOUT = 15
 SCAN_INTERVAL_STANDARD = 20  # 90
 SCAN_SLEEP = max(0, SCAN_INTERVAL_STANDARD - SCAN_TIMEOUT)
+
+# Optional ``[orion] PairingPin=…`` override for Orion-TR BLE pairing (see ``orion_tr_pin.py``).
+ORION_OPTIONAL_INI = "/data/conf/dbus-ble-sensors-py-orion.ini"

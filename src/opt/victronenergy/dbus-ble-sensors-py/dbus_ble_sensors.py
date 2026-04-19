@@ -10,8 +10,10 @@ import dbus
 from dbus.mainloop.glib import DBusGMainLoop
 from argparse import ArgumentParser
 from ble_device import BleDevice
+from ble_device_orion_tr import BleDeviceOrionTR, is_orion_tr_manufacturer_data
 from ble_role import BleRole
 from dbus_ble_service import DbusBleService
+from scan_control import is_scanning_paused
 import bleak
 import gbulb
 from logger import setup_logging
@@ -119,8 +121,15 @@ class DbusBleSensors(object):
                     # Snif new device advertising data
                     self.snif_data(man_id, man_data)
 
-                    # Get device class from manufacturer id
-                    device_class = BleDevice.DEVICE_CLASSES.get(man_id, None)
+                    # Get device class from manufacturer id.
+                    # Victron manufacturer id 0x02E1 is shared between multiple product families
+                    # (e.g. Orion-TR Smart non-isolated vs encrypted-advertisement devices);
+                    # route Orion-TR advertisements (product ids 0xA3C0..0xA3DF) to the
+                    # dedicated class before falling back to DEVICE_CLASSES.
+                    if man_id == 0x02E1 and is_orion_tr_manufacturer_data(man_data):
+                        device_class = BleDeviceOrionTR
+                    else:
+                        device_class = BleDevice.DEVICE_CLASSES.get(man_id, None)
                     if device_class is None:
                         logging.info(f"{plog} ignoring data {man_data!r}, no device configuration class for manufacturer {man_id!r}")
                         self._ignored_mac[dev_mac] = True
@@ -162,6 +171,12 @@ class DbusBleSensors(object):
             if len(self._adapters) < 1:
                 logging.warning("Waiting for a bluetooth adapter...")
                 await asyncio.sleep(5)
+                continue
+            # Drivers needing exclusive GATT access (e.g. Orion-TR key
+            # provisioning and daily refresh) can pause scanning via
+            # scan_control.pause_scanning(); idle until they release it.
+            if is_scanning_paused():
+                await asyncio.sleep(1)
                 continue
             scan_tasks = [asyncio.create_task(self._scan(adapter)) for adapter in self._adapters]
             await asyncio.gather(*scan_tasks)
