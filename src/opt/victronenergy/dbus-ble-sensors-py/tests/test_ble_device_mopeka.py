@@ -39,18 +39,8 @@ class BleDeviceSafieryTests(BleDeviceBaseTests):
                     'HardwareID': 3,
                     'TankLevelExtension': 0,
                     'BatteryVoltage': 3.125,
+                    'Temperature': 20.0,
                     'RawValue': 5000,
                 },
-                "temperature": {
-                    'HardwareID': 3,
-                    'BatteryVoltage': 3.125,
-                    'Temperature': 20.0,
-                },
-                "movement": {
-                    'HardwareID': 3,
-                    'BatteryVoltage': 3.125,
-                    'AccelX': -0.01171875,
-                    'AccelY': 0.0078125,
-                }
             }
         )

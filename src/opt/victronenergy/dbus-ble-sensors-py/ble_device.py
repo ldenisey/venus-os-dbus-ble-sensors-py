@@ -334,9 +334,10 @@ class BleDevice(object):
             # Filtering data
             role_data = sensor_data[role_service.ble_role.NAME]
             if role_data:
-                # Update sensor data from update callbacks
-                role_service.ble_role.update_data(role_service, role_data)
+                # Device-level transform first (e.g. Mopeka xlate scaling),
+                # then role-level computation (e.g. tank Level from RawValue).
                 self.update_data(role_service, role_data)
+                role_service.ble_role.update_data(role_service, role_data)
 
                 # Update Dbus with new data
                 self._update_dbus_data(role_service, role_data)

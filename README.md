@@ -16,6 +16,7 @@ Devices currently supported :
 | Mopeka         | Mopeka Pro Plus            | https://mopeka.com/consumer-solutions/#:~:text=Mopeka%20Pro%20Plus                                             |
 | Mopeka         | Mopeka TD40                | https://mopeka.com/consumer-solutions/#:~:text=Mopeka%20TD40                                                   |
 | Mopeka         | Mopeka TD200               | https://mopeka.com/commercial-industry-based-solutions/water/#:~:text=Mopeka%20TD40,%20TD200                   |
+| Mopeka         | Mopeka Tank Check (M1001)  | https://mopeka.com/                                                                                            |
 | Ruuvi          | Ruuvi Tag                  | https://ruuvi.com/ruuvitag/                                                                                    |
 | Ruuvi          | Ruuvi Air                  | https://ruuvi.com/air/                                                                                         |
 
