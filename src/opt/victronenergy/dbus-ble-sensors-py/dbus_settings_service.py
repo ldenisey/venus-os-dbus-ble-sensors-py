@@ -28,38 +28,74 @@ class DbusSettingsService(object):
 
     def get_item(self, path: str, def_value: object = None, min_value: int = 0, max_value: int = 0) -> VeDbusItemImport:
         # Get the setting item, initializing it only if it does not exists and if a default value is given
-        if (item := self._paths.get(path, None)) is None:
-            item = VeDbusItemImport(self._bus, self._SETTINGS_SERVICENAME, path)
-            if not item.exists and def_value is not None:
-                item = self.set_item(path, def_value, min_value, max_value)
-            self._paths[path] = item
+        if (item := self._paths.get(path, None)) is not None:
+            return item
+
+        # Probe existence with a non-subscribing import.  Each
+        # ``VeDbusItemImport`` constructed with ``createsignal=True``
+        # (the default) installs a D-Bus match rule that is owned by
+        # the connection, not by the Python object — once the rule is
+        # in place the daemon counts it against the per-connection
+        # ``max_match_rules_per_connection`` limit (1024 by default)
+        # even after the import is garbage-collected.  Probe without
+        # subscribing so a single long-lived signal-bearing import is
+        # the only rule we add per cache miss.
+        probe = VeDbusItemImport(self._bus, self._SETTINGS_SERVICENAME, path, createsignal=False)
+
+        if not probe.exists:
+            if def_value is None:
+                # Nothing to bind a subscription to.  Cache the probe so
+                # repeated lookups don't re-probe; callers that depend on
+                # ``.exists`` will see False.
+                self._paths[path] = probe
+                return probe
+            return self._add_and_subscribe(path, def_value, min_value, max_value, silent=False, callback=None)
+
+        # Setting exists; bind exactly one signal-bearing import.
+        item = VeDbusItemImport(self._bus, self._SETTINGS_SERVICENAME, path)
+        self._paths[path] = item
         return item
 
     def get_value(self, path) -> object:  # int, float, str, None
         return self.get_item(path).get_value()
 
     def set_item(self, path: str, def_value: object = None, min_value: int = 0, max_value: int = 0, silent=False, callback=None) -> VeDbusItemImport:
+        # Probe existence and current attributes without subscribing — see
+        # the ``get_item`` comment for why we cannot afford a throwaway
+        # signal-bearing import here.
+        probe = VeDbusItemImport(self._bus, self._SETTINGS_SERVICENAME, path, createsignal=False)
+
+        if probe.exists and (def_value, min_value, max_value, silent) == probe._proxy.GetAttributes():
+            item = VeDbusItemImport(self._bus, self._SETTINGS_SERVICENAME, path, callback)
+            self._paths[path] = item
+            return item
+
+        return self._add_and_subscribe(path, def_value, min_value, max_value, silent, callback)
+
+    def _add_and_subscribe(self, path: str, def_value: object, min_value: int,
+                           max_value: int, silent: bool, callback) -> VeDbusItemImport:
+        """Call ``AddSetting`` (or ``AddSilentSetting``) on
+        ``com.victronenergy.settings`` for *path*, then bind a single
+        signal-bearing import.  The ``/Settings`` parent probe used to
+        invoke the method is constructed with ``createsignal=False`` and
+        immediately discarded — only one match rule is added per call.
+        """
+        if isinstance(def_value, (int, dbus.Int64)):
+            itemType = 'i'
+        elif isinstance(def_value, float):
+            itemType = 'f'
+        else:
+            itemType = 's'
+
+        parent_probe = VeDbusItemImport(
+            self._bus, self._SETTINGS_SERVICENAME, '/Settings', createsignal=False)
+        setting_path = path.replace('/Settings/', '', 1)
+        if silent:
+            parent_probe._proxy.AddSilentSetting('', setting_path, def_value, itemType, min_value, max_value)
+        else:
+            parent_probe._proxy.AddSetting('', setting_path, def_value, itemType, min_value, max_value)
+
         busitem = VeDbusItemImport(self._bus, self._SETTINGS_SERVICENAME, path, callback)
-        if not busitem.exists or (def_value, min_value, max_value, silent) != busitem._proxy.GetAttributes():
-            # Get value type
-            if isinstance(def_value, (int, dbus.Int64)):
-                itemType = 'i'
-            elif isinstance(def_value, float):
-                itemType = 'f'
-            else:
-                itemType = 's'
-
-            # Add the setting
-            setting_item = VeDbusItemImport(self._bus, self._SETTINGS_SERVICENAME, '/Settings', createsignal=False)
-            setting_path = path.replace('/Settings/', '', 1)
-            if silent:
-                setting_item._proxy.AddSilentSetting('', setting_path, def_value, itemType, min_value, max_value)
-            else:
-                setting_item._proxy.AddSetting('', setting_path, def_value, itemType, min_value, max_value)
-
-            # Get the setting as a victron bus item
-            busitem = VeDbusItemImport(self._bus, self._SETTINGS_SERVICENAME, path, callback)
-
         self._paths[path] = busitem
         return busitem
 
