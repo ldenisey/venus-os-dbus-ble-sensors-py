@@ -4,7 +4,6 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from ble_role_movement import BleRoleMovement
 
-
 class BleRoleMovementTests(unittest.TestCase):
     def setUp(self):
         self.role = BleRoleMovement()

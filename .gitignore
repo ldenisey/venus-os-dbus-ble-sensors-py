@@ -1,5 +1,22 @@
 **/__pycache__/
-**/ext/
+**/*.pyc
+**/ext/*
+# Exception: vendored victron_ble (Unlicense / public domain).  Sourced
+# from PyPI victron-ble 0.9.3 with a local cryptography-backend patch.
+# See ext/victron_ble/VENDORED.md for the rationale and patch details.
+# velib_python is still excluded — install.sh fetches it at runtime.
+!src/opt/victronenergy/dbus-ble-sensors-py/ext/victron_ble
+!src/opt/victronenergy/dbus-ble-sensors-py/ext/victron_ble/**
+# Re-ignore byte-compile caches inside the vendored package (the
+# !ext/victron_ble/** exception above is broad enough to allow them).
+src/opt/victronenergy/dbus-ble-sensors-py/ext/victron_ble/**/__pycache__/
+src/opt/victronenergy/dbus-ble-sensors-py/ext/victron_ble/**/*.pyc
+# Exception: vendored victron-bluetooth-safety (Apache 2.0).  Sourced
+# from TechBlueprints/victron-bluetooth-safety.  Patches vesmart-server
+# to stop its 60s mass-disconnect of all BLE devices (venus#1587).
+# See ext/victron-bluetooth-safety/VENDORED.md for details.
+!src/opt/victronenergy/dbus-ble-sensors-py/ext/victron-bluetooth-safety
+!src/opt/victronenergy/dbus-ble-sensors-py/ext/victron-bluetooth-safety/**
 *.iml
 .idea/
 *.code-workspace

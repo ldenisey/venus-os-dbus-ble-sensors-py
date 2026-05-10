@@ -1,6 +1,5 @@
 from enum import IntEnum
 
-
 class VeDataBasicType(IntEnum):
     VE_HEAP_STR = 0
     VE_UN8 = 1
@@ -31,7 +30,6 @@ class VeDataBasicType(IntEnum):
         """
         return not (int(self) & 1)
 
-
 def is_int(_type: VeDataBasicType) -> bool:
     """
     Is the given type an int ?
@@ -40,13 +38,11 @@ def is_int(_type: VeDataBasicType) -> bool:
         return False
     return int(_type) <= VeDataBasicType.VE_SN32
 
-
 def int_size(_type: VeDataBasicType) -> int:
     """
     Returns type's number of bytes
     """
     return (int(_type) + 1) // 2
-
 
 def is_int_signed(_type: VeDataBasicType) -> bool:
     """
@@ -54,14 +50,12 @@ def is_int_signed(_type: VeDataBasicType) -> bool:
     """
     return not (int(_type) & 1)
 
-
 def int_zext(_int: int, bits: int) -> int:
     """
     Zero-extend an unsigned int encoded in 'bits' bits to Python int
     """
     mask = (1 << bits) - 1
     return _int & mask
-
 
 def int_sext(_int: int, bits: int) -> int:
     """
@@ -72,7 +66,6 @@ def int_sext(_int: int, bits: int) -> int:
     if _int & sign_bit:
         return _int - (1 << bits)
     return _int
-
 
 # Explicitly expose enum members in the module namespace
 VE_HEAP_STR = VeDataBasicType.VE_HEAP_STR

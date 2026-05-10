@@ -7,7 +7,6 @@ from ble_role import BleRole
 import unittest
 import logging
 
-
 # @unittest.skip("Base test class")
 class BleDeviceBaseTests(unittest.TestCase):
 

@@ -3,7 +3,6 @@ import logging
 from ble_device import BleDevice
 from dbus_role_service import DbusRoleService
 
-
 class BleDeviceTeltonika(BleDevice):
     """
     Teltonika device class managing EYE Sensor (BTSMP1) devices.

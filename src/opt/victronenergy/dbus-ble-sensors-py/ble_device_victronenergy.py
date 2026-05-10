@@ -2,7 +2,6 @@ from ve_types import *
 from ble_device import BleDevice
 from dbus_role_service import DbusRoleService
 
-
 class BleDeviceVictronEnergy(BleDevice):
     """
     Victron Energy devices class managing SolarSense 750 BLE devices.

@@ -1,7 +1,6 @@
 from ve_types import *
 from ble_device import BleDevice
 
-
 class BleDeviceGobius(BleDevice):
     """
     Gobius C device class.

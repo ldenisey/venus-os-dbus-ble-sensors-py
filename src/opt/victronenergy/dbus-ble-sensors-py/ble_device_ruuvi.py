@@ -5,7 +5,6 @@ import logging
 import math
 from dbus_role_service import DbusRoleService
 
-
 class BleDeviceRuuvi(BleDevice):
     """
     Ruuvi devices class managing :
@@ -261,18 +260,23 @@ class BleDeviceRuuvi(BleDevice):
             return len(manufacturer_data) == self.manufacturer_data_length
 
     def update_data(self, role_service: DbusRoleService, sensor_data: dict):
+        # Flags (format 6 / Ruuvi Air only) carry extra VOC/NOX bits. Format 5
+        # (RuuviTag) has no Flags reg — do not require it for those frames.
+        voc = sensor_data.get('VOC', None)
+        nox = sensor_data.get('NOX', None)
+        if voc is None and nox is None:
+            return
+
         flags = sensor_data.get('Flags', None)
         if flags is None or flags > 255:
             logging.warning(f"{self._plog} can not update sensor data, missing Flags value")
             return
 
-        voc = sensor_data.get('VOC', None)
         if voc is not None:
             sensor_data['VOC'] = (voc << 1) | ((flags >> 6) & 1)
             if sensor_data['VOC'] == 0x1ff:
                 sensor_data['VOC'] = None
 
-        nox = sensor_data.get('NOX', None)
         if nox is not None:
             sensor_data['NOX'] = (nox << 1) | ((flags >> 7) & 1)
             if sensor_data['NOX'] == 0x1ff:

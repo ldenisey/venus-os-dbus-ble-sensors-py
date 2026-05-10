@@ -1,0 +1,4 @@
+#!/bin/sh
+# vesmart-safety: vesmart-server disabled by bind-mount (venus#1587)
+# daemontools restarts whatever exits, so block here indefinitely.
+exec sleep 86400

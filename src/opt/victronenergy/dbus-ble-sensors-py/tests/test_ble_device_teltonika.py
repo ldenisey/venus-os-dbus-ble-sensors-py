@@ -6,7 +6,6 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..', 'ext', 'velib_p
 from ble_device_teltonika import BleDeviceTeltonika
 from ble_device_base_tests import BleDeviceBaseTests
 
-
 class BleDeviceTeltonikaTests(BleDeviceBaseTests):
     # To be executed with command : python3 -m unittest test_ble_device_teltonika.py
 
@@ -141,4 +140,4 @@ class BleDeviceTeltonikaTests(BleDeviceBaseTests):
         with self.assertRaises(ValueError) as e:
             self._test_parsing(raw_data, expected_dict)
         self.assertEqual(str(e.exception),
-                         "7cd9f411427d - Teltonika Eye 11427D: Configuration 'roles' must have at least one element")
+                         "7cd9f411427d - Teltonika Eye: Configuration 'roles' must have at least one element")
