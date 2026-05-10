@@ -27,15 +27,19 @@ class DbusRoleService(object):
             'org.freedesktop.DBus')
         self._dev_id = self._ble_device.info['dev_id']
         self._dbus_id = f"{self._dev_id}/{self.ble_role.NAME}"
+        # Cache of register() / disconnect() state so that ``is_connected``
+        # is a pure local check and does not synchronously round-trip the
+        # daemon for every advertisement.  ``handle_manufacturer_data``
+        # calls ``connect`` once per advertisement per role service; with
+        # tens of devices and a busy bus, that adds up to hundreds of
+        # NameHasOwner RPCs per second.
+        self._connected: bool = False
         self._init_dbus_service()
 
     def is_connected(self) -> bool:
-        # Local check
         if self._dbus_service is None:
             return False
-
-        # Dbus check
-        return self._dbus_iface.NameHasOwner(self._service_name)
+        return self._connected
 
     def _get_vrm_instance(self) -> int:
         # Try and get instance saved in settings
@@ -114,6 +118,7 @@ class DbusRoleService(object):
 
             logging.info(f"{self._ble_device._plog} registering {self._service_name!r} dbus service on bus {self._bus}")
             self._dbus_service.register()
+            self._connected = True
 
     def disconnect(self):
         if not self.is_connected():
@@ -121,6 +126,7 @@ class DbusRoleService(object):
         logging.info(f"{self._ble_device._plog} releasing '{self._service_name}' dbus service")
         self._dbus_service._dbusname.__del__()
         self._dbus_service._dbusname = None
+        self._connected = False
 
     def on_enabled_changed(self, is_enabled: int):
         if is_enabled:
