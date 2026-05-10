@@ -16,7 +16,7 @@ class BleRoleMovement(BleRole):
     NAME = 'movement'
 
     def __init__(self, config: dict = None):
-        super().__init__()
+        super().__init__(config)
         self._count = None
 
         self.info.update(
