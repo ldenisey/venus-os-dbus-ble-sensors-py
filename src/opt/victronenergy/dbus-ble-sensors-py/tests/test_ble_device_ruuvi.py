@@ -6,7 +6,6 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..', 'ext', 'velib_p
 from ble_device_base_tests import BleDeviceBaseTests
 from ble_device_ruuvi import BleDeviceRuuvi
 
-
 class BleDeviceRuuviTests(BleDeviceBaseTests):
     # To be executed with command : python3 -m unittest test_ble_device_ruuvi.py
 
@@ -124,6 +123,88 @@ class BleDeviceRuuviTests(BleDeviceBaseTests):
                     'BatteryVoltage': 2.584,
                     'TxPower': 4.0,
                     'SeqNo': 16713,
+                }
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # Real RAWv2 (format 5) advertisements captured via `btmon` on a
+    # production Cerbo GX, May 2026.  Each test pairs the real BLE
+    # address with the byte-for-byte advertisement payload as it came
+    # off the wire, and pins the parser output.
+    # ------------------------------------------------------------------
+
+    def test_capture_real_e211de042d38(self):
+        # RuuviTag E2:11:DE:04:2D:38 — RAWv2 advertisement
+        self.device = BleDeviceRuuvi('e211de042d38')
+        self._test_parsing(
+            bytes.fromhex('0510d634428f9603a40194ffeca6f65fbcfae211de042d38'),
+            {
+                'temperature': {
+                    'Temperature': 21.55,
+                    'Humidity': 33.445,
+                    'Pressure': 867.5799999999999,
+                    'BatteryVoltage': 2.935,
+                    'TxPower': 4.0,
+                    'SeqNo': 48378,
+                },
+                'movement': {
+                    'AccelX': 0.932,
+                    'AccelY': 0.404,
+                    'AccelZ': -0.02,
+                    'BatteryVoltage': 2.935,
+                    'TxPower': 4.0,
+                    'SeqNo': 48378,
+                }
+            }
+        )
+
+    def test_capture_real_e07b72c3e2f8(self):
+        # RuuviTag E0:7B:72:C3:E2:F8 — RAWv2 advertisement
+        self.device = BleDeviceRuuvi('e07b72c3e2f8')
+        self._test_parsing(
+            bytes.fromhex('0512c42a818f9704000014ffd8a7168f31b9e07b72c3e2f8'),
+            {
+                'temperature': {
+                    'Temperature': 24.02,
+                    'Humidity': 27.2025,
+                    'Pressure': 867.5899999999999,
+                    'BatteryVoltage': 2.936,
+                    'TxPower': 4.0,
+                    'SeqNo': 12729,
+                },
+                'movement': {
+                    'AccelX': 1.024,
+                    'AccelY': 0.02,
+                    'AccelZ': -0.04,
+                    'BatteryVoltage': 2.936,
+                    'TxPower': 4.0,
+                    'SeqNo': 12729,
+                }
+            }
+        )
+
+    def test_capture_real_f0ad5dba8b9d(self):
+        # RuuviTag F0:AD:5D:BA:8B:9D — RAWv2 advertisement
+        self.device = BleDeviceRuuvi('f0ad5dba8b9d')
+        self._test_parsing(
+            bytes.fromhex('05145921c18fc2030402a4ffc0a23601310af0ad5dba8b9d'),
+            {
+                'temperature': {
+                    'Temperature': 26.045,
+                    'Humidity': 21.6025,
+                    'Pressure': 868.02,
+                    'BatteryVoltage': 2.8970000000000002,
+                    'TxPower': 4.0,
+                    'SeqNo': 12554,
+                },
+                'movement': {
+                    'AccelX': 0.772,
+                    'AccelY': 0.676,
+                    'AccelZ': -0.064,
+                    'BatteryVoltage': 2.8970000000000002,
+                    'TxPower': 4.0,
+                    'SeqNo': 12554,
                 }
             }
         )

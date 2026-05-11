@@ -6,7 +6,6 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..', 'ext', 'velib_p
 from ble_device_base_tests import BleDeviceBaseTests
 from ble_device_safiery import BleDeviceSafiery
 
-
 class BleDeviceSafieryTests(BleDeviceBaseTests):
     # To be executed with command : python3 -m unittest test_ble_device_safiery.py
 

@@ -3,7 +3,6 @@ import inspect
 import logging
 import importlib.util
 
-
 class BleRole(object):
     """
     Base class representing a type/kind/class of device.
@@ -20,6 +19,7 @@ class BleRole(object):
             'settings': [],     # Optional, list of dict, settings that could be set through UI
             'alarms': [],       # Optional, list of dict, raisable alarms
         }
+        self._custom_name_default = config.get('custom_name', '') if config else ''
 
     def init(self, role_service):
         """

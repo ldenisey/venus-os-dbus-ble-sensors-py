@@ -6,7 +6,6 @@ from ble_device import BleDevice
 from ble_device_base_tests import BleDeviceBaseTests
 from ve_types import *
 
-
 class _DummyDevice(BleDevice):
     MANUFACTURER_ID = 0x1234
 
@@ -36,7 +35,6 @@ class _DummyDevice(BleDevice):
                 {'name': 'Ignored', 'type': VE_UN8, 'offset': 13, 'roles': [None]},
             ]
         })
-
 
 class BleDeviceParsingTests(BleDeviceBaseTests):
     def setUp(self):

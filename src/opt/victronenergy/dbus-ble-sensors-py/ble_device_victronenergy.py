@@ -2,7 +2,6 @@ from ve_types import *
 from ble_device import BleDevice
 from dbus_role_service import DbusRoleService
 
-
 class BleDeviceVictronEnergy(BleDevice):
     """
     Victron Energy devices class managing SolarSense 750 BLE devices.
@@ -43,6 +42,7 @@ class BleDeviceVictronEnergy(BleDevice):
                     'bits': 20,
                     'flags': ['REG_FLAG_INVALID'],
                     'inval': 0xfffff,
+                    'sensor_type': 'power',
                     # .format = &veUnitWatt,
                 },
                 {
@@ -54,6 +54,7 @@ class BleDeviceVictronEnergy(BleDevice):
                     'bits': 20,
                     'flags': ['REG_FLAG_INVALID'],
                     'inval': 0xfffff,
+                    'round': 2,  # kWh — 0.01 kWh = 10 Wh resolution
                     # .format = &veUnitKiloWattHour,
                 },
                 {
@@ -64,6 +65,7 @@ class BleDeviceVictronEnergy(BleDevice):
                     'bits': 14,
                     'flags': ['REG_FLAG_INVALID'],
                     'inval': 0x3fff,
+                    'round': 1,  # W/m² — 0.1 W/m²
                     # .format = &veUnitIrradiance1Dec,
                 },
                 {
@@ -76,6 +78,7 @@ class BleDeviceVictronEnergy(BleDevice):
                     'bias': -60,
                     'flags': ['REG_FLAG_INVALID'],
                     'inval': 0x7ff,
+                    'sensor_type': 'temperature',
                     # .format	= &veUnitCelsius1Dec,
                 },
                 {
@@ -95,6 +98,7 @@ class BleDeviceVictronEnergy(BleDevice):
                     'bias': 1.7,
                     'flags': ['REG_FLAG_INVALID'],
                     'inval': 0xff,
+                    'sensor_type': 'voltage',
                     # .format = &veUnitVolt2Dec,
                 },
                 {

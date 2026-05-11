@@ -7,8 +7,8 @@ from functools import partial
 from dbus_ble_service import DbusBleService
 from dbus_role_service import DbusRoleService
 from ble_role import BleRole
+from sensor_publisher import SensorPublisher
 from ve_types import *
-
 
 class BleDevice(object):
     """
@@ -21,6 +21,7 @@ class BleDevice(object):
     """
 
     MANUFACTURER_ID = None  # To be overloaded in children classes: int, ble manufacturer id
+    CUSTOM_PARSING = False  # Set True in subclasses that override handle_manufacturer_data() and don't use regs
 
     # Dict of devices classes, key is manufacturer id
     DEVICE_CLASSES = {}
@@ -121,7 +122,6 @@ class BleDevice(object):
 
     def _load_configuration(self):
         self.info['manufacturer_id'] = self.MANUFACTURER_ID
-        self.info['device_name'] = self.info['device_name'] + ' ' + self.info['dev_mac'][-6:].upper()
         self._plog = f"{self.info['dev_mac']} - {self.info['device_name']}:"
 
         for key in ['manufacturer_id', 'product_id', 'product_name', 'device_name', 'dev_prefix', 'roles', 'regs', 'settings', 'alarms']:
@@ -142,9 +142,10 @@ class BleDevice(object):
             if not isinstance(self.info[dict_key], dict):
                 raise ValueError(f"{self._plog} Configuration '{dict_key}' must be a dict")
 
-        for collection_mandatory in ['roles', 'regs']:
-            if self.info[collection_mandatory].__len__() < 1:
-                raise ValueError(f"{self._plog} Configuration '{collection_mandatory}' must have at least one element")
+        if self.info['roles'].__len__() < 1:
+            raise ValueError(f"{self._plog} Configuration 'roles' must have at least one element")
+        if not self.CUSTOM_PARSING and self.info['regs'].__len__() < 1:
+            raise ValueError(f"{self._plog} Configuration 'regs' must have at least one element")
 
         for role_name in self.info['roles'].keys():
             if role_name not in BleRole.ROLE_CLASSES:
@@ -217,6 +218,66 @@ class BleDevice(object):
             # Creating entries in ble service to enable/disable options
             DbusBleService.get().register_role_service(role_service)
         logging.debug(f"{self._plog} initialized")
+
+    def _create_indexed_role_service(self, role_type: str, index: int, device_name: str = None, config: dict = None):
+        """
+        Create a role service for a specific slot index, producing a unique D-Bus
+        service name like com.victronenergy.tank.{dev_prefix}_{mac}_{index:02d}.
+
+        Use this for devices that expose multiple instances of the same role type
+        (e.g. multi-tank monitors). The service is stored in _role_services keyed
+        by '{role_type}_{index:02d}' and registered with DbusBleService.
+
+        Returns the DbusRoleService, or None on failure.
+        """
+        key = f'{role_type}_{index:02d}'
+        if key in self._role_services:
+            return self._role_services[key]
+
+        role_cls = BleRole.get_class(role_type)
+        if role_cls is None:
+            logging.error(f"{self._plog} unknown role type {role_type!r}")
+            return None
+
+        role = role_cls(config or {})
+        try:
+            role.check_configuration()
+        except ValueError as e:
+            logging.error(f"{self._plog} ignoring {role_type} index {index}: {e}")
+            return None
+
+        # Pass the indexed dev id explicitly to the role-service
+        # constructor.  ``self.info['dev_id']`` is read once to compute
+        # the override and never mutated; a failure during init
+        # therefore cannot leak partial state into subsequent calls.
+        indexed_dev_id = f"{self.info['dev_id']}_{index:02d}"
+        try:
+            role_service = DbusRoleService(self, role, dev_id=indexed_dev_id)
+            role_service.load_settings()
+
+            if device_name:
+                role_service['DeviceName'] = device_name
+
+            self._role_services[key] = role_service
+            DbusBleService.get().register_role_service(role_service)
+        except Exception:
+            logging.exception(
+                f"{self._plog} failed to create indexed {role_type} "
+                f"service [{index:02d}]"
+            )
+            return None
+
+        logging.info(f"{self._plog} created indexed {role_type} service [{index:02d}]")
+        return role_service
+
+    def _is_indexed_role_enabled(self, role_type: str, index: int) -> bool:
+        """Check if a specific indexed role service is enabled in the GUI."""
+        key = f'{role_type}_{index:02d}'
+        role_service = self._role_services.get(key)
+        if role_service is None:
+            return False
+        enabled_path = f"/Devices/{role_service.get_dev_id()}_{role_type}/Enabled"
+        return bool(DbusBleService.get()._get_value(enabled_path))
 
     def _load_str(self, reg: dict, manufacturer_data: bytes) -> str:
         # Check there is enough data
@@ -312,9 +373,71 @@ class BleDevice(object):
         return values
 
     def _update_dbus_data(self, role_service: DbusRoleService, sensor_data: dict):
-        for name, value in sensor_data.items():
-            role_service[name] = value
-            # TODO Find out what c method veItemSetFmt() do
+        # Route every per-advertisement write through SensorPublisher so
+        # we get policy-driven rounding (per-type display resolution),
+        # change-detection (skip if rounded value matches last
+        # published), and the republish heartbeat (force an emit every
+        # /Settings/SensorRounding/HeartbeatSeconds even when nothing
+        # changed).
+        #
+        # The reg dict carries an optional ``sensor_type`` field (e.g.
+        # 'temperature', 'voltage') and/or an explicit ``round`` field
+        # for edge cases.  Regs that lack both pass through unrounded
+        # — but still benefit from change-detection + heartbeat dedup.
+        #
+        # The outer ``with role_service:`` keeps the existing batched-
+        # PropertiesChanged behavior: if multiple paths actually changed
+        # within this ad, vedbus coalesces them into one ItemsChanged.
+        publisher = SensorPublisher.get()
+        regs_by_name = self._regs_by_name()
+        with role_service:
+            for name, value in sensor_data.items():
+                reg = regs_by_name.get(name, {})
+                if publisher is not None:
+                    publisher.publish(
+                        role_service, name, value,
+                        sensor_type=reg.get('sensor_type'),
+                        override=reg.get('round'),
+                    )
+                else:
+                    # Fallback for tests / pre-init: skip rounding & dedup.
+                    role_service[name] = value
+
+    def _publish_value(self, role_service: DbusRoleService, path: str,
+                       value, sensor_type: 'str | None' = None,
+                       override: 'int | None' = None) -> bool:
+        """Publish a single value via :class:`SensorPublisher`.
+
+        Use this from drivers that publish *explicit paths* rather
+        than going through the regs table — e.g. Orion-TR's ``_publish``
+        which writes ``/Serial``, ``/State``, ``/Mode`` etc. based on
+        decoded advertisement fields, not on a regs definition.
+
+        Returns ``True`` if a write happened, ``False`` if skipped.
+        Falls back to a direct ``role_service[path] = value`` when no
+        publisher is initialised (tests / pre-init).
+        """
+        publisher = SensorPublisher.get()
+        if publisher is not None:
+            return publisher.publish(role_service, path, value,
+                                     sensor_type=sensor_type,
+                                     override=override)
+        role_service[path] = value
+        return True
+
+    def _regs_by_name(self) -> dict:
+        """Build a {reg_name: reg_dict} lookup for the active model.
+
+        Cached on the instance after first use — the regs list is
+        immutable for the lifetime of the device.
+        """
+        cached = getattr(self, '_regs_by_name_cache', None)
+        if cached is not None:
+            return cached
+        cache = {reg['name']: reg for reg in self.info.get('regs', [])
+                 if 'name' in reg}
+        self._regs_by_name_cache = cache
+        return cache
 
     def handle_manufacturer_data(self, manufacturer_data: bytes):
         """
@@ -334,9 +457,10 @@ class BleDevice(object):
             # Filtering data
             role_data = sensor_data[role_service.ble_role.NAME]
             if role_data:
-                # Update sensor data from update callbacks
-                role_service.ble_role.update_data(role_service, role_data)
+                # Device-level transform first (e.g. Mopeka xlate scaling),
+                # then role-level computation (e.g. tank Level from RawValue).
                 self.update_data(role_service, role_data)
+                role_service.ble_role.update_data(role_service, role_data)
 
                 # Update Dbus with new data
                 self._update_dbus_data(role_service, role_data)

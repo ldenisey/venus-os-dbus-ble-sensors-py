@@ -1,41 +1,57 @@
-import os
 import logging
 import dbus
+from dbus_bus import get_bus
 from dbus_settings_service import DbusSettingsService
 from ble_role import BleRole
 from functools import partial
 from conf import PROCESS_NAME, PROCESS_VERSION
 from vedbus import VeDbusService, VeDbusItemImport, VeDbusItemExport
 
-
 class DbusRoleService(object):
     """
     Role service class. Responsible for holding and sharing data through a dedicated dbus service.
     """
 
-    def __init__(self, ble_device, ble_role: BleRole):
-        # private=True to allow creation of multiple services in the same app
-        self._bus: dbus.Bus = dbus.SessionBus(
-            private=True) if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else dbus.SystemBus(private=True)
-        self._dbus_settings = DbusSettingsService()
+    def __init__(self, ble_device, ble_role: BleRole, dev_id: str = None):
+        """Construct a role service for *ble_device* fulfilling *ble_role*.
+
+        *dev_id* — explicit override of the device id used for the bus
+        name and settings paths.  Multi-sensor devices (e.g. SeeLevel)
+        register one role service per sensor channel and need names like
+        ``com.victronenergy.tank.<dev_prefix>_<mac>_<index:02d>``; they
+        pass the indexed value here.  When omitted, falls back to the
+        canonical ``ble_device.info['dev_id']`` set during the device's
+        configure pass.  This parameter exists so callers do not need
+        to mutate ``ble_device.info`` to inject a different dev id —
+        that pattern previously caused unbounded settings-path growth
+        on exception (see ``_create_indexed_role_service``).
+        """
         self._ble_device = ble_device
         self.ble_role = ble_role
+        self._dev_id = dev_id if dev_id is not None else self._ble_device.info['dev_id']
+        self._dbus_id = f"{self._dev_id}/{self.ble_role.NAME}"
+        self._service_name = f"com.victronenergy.{self.ble_role.NAME}.{self._dev_id}"
+        self._bus: dbus.bus.BusConnection = get_bus(self._service_name)
+        self._dbus_settings = DbusSettingsService()
         self._dbus_service: VeDbusService = None
-        self._service_name: str = None
         self._dbus_iface = dbus.Interface(
             self._bus.get_object('org.freedesktop.DBus', '/org/freedesktop/DBus'),
             'org.freedesktop.DBus')
-        self._dev_id = self._ble_device.info['dev_id']
-        self._dbus_id = f"{self._dev_id}/{self.ble_role.NAME}"
+        # Local cache of register/disconnect lifecycle state.  ``connect``
+        # is called once per advertisement per role service from
+        # ``BleDevice.handle_manufacturer_data`` — without this cache,
+        # ``is_connected`` round-trips the daemon via ``NameHasOwner``
+        # on every call (~140 RPCs/s on a busy gateway, accounting for
+        # most of the service's CPU time).  The bus name only changes
+        # via the connect/disconnect paths in this process, so a local
+        # flag is authoritative.
+        self._connected: bool = False
         self._init_dbus_service()
 
     def is_connected(self) -> bool:
-        # Local check
         if self._dbus_service is None:
             return False
-
-        # Dbus check
-        return self._dbus_iface.NameHasOwner(self._service_name)
+        return self._connected
 
     def _get_vrm_instance(self) -> int:
         # Try and get instance saved in settings
@@ -68,8 +84,6 @@ class DbusRoleService(object):
         return cur_instance
 
     def _init_dbus_service(self):
-        self._service_name = f"com.victronenergy.{self.ble_role.NAME}.{self._dev_id}"
-
         logging.debug(f"{self._ble_device._plog} initializing dbus {self._service_name!r}")
         self._dbus_service = VeDbusService(self._service_name, self._bus, False)
 
@@ -114,6 +128,7 @@ class DbusRoleService(object):
 
             logging.info(f"{self._ble_device._plog} registering {self._service_name!r} dbus service on bus {self._bus}")
             self._dbus_service.register()
+            self._connected = True
 
     def disconnect(self):
         if not self.is_connected():
@@ -121,6 +136,7 @@ class DbusRoleService(object):
         logging.info(f"{self._ble_device._plog} releasing '{self._service_name}' dbus service")
         self._dbus_service._dbusname.__del__()
         self._dbus_service._dbusname = None
+        self._connected = False
 
     def on_enabled_changed(self, is_enabled: int):
         if is_enabled:
@@ -170,6 +186,17 @@ class DbusRoleService(object):
     def __delitem__(self, path: str):
         self._delete_item(path)
 
+    def __enter__(self):
+        # Delegate to the underlying ``VeDbusService`` so callers can
+        # batch many ``__setitem__`` calls into a single
+        # ``PropertiesChanged`` emit.  ``VeDbusService`` is refcounted,
+        # so nested ``with`` blocks compose correctly.
+        self._dbus_service.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self._dbus_service.__exit__(exc_type, exc_val, exc_tb)
+
     def _set_proxy_callback(self, item_path: str, setting_item: VeDbusItemImport, callback=None):
         def _callback(change_path, new_value):
             if change_path != item_path:
@@ -201,10 +228,11 @@ class DbusRoleService(object):
         return self._dbus_id
 
     def _init_custom_name(self):
+        default_name = getattr(self.ble_role, '_custom_name_default', '')
         self._set_proxy_setting(
             f"/Settings/Devices/{self._dbus_id}/CustomName",
             '/CustomName',
-            '',
+            default_name,
         )
 
     def get_custom_name(self) -> str:
@@ -213,6 +241,12 @@ class DbusRoleService(object):
     def get_device_name(self) -> str:
         return self._get_value('/DeviceName')
 
+    def get_role_count(self) -> int:
+        """Number of roles the parent device class publishes (e.g. a Ruuvi
+        Tag publishes both ``temperature`` and ``movement``, so this returns
+        2; a Mopeka tank returns 1)."""
+        return len(self._ble_device.info.get('roles') or {})
+
     def add_setting(self, setting: dict, callback=None):
         name = self._clear_path(setting['name'])
         props = setting['props']
@@ -220,8 +254,8 @@ class DbusRoleService(object):
             f"/Settings/Devices/{self._dbus_id}{name}",
             name,
             props['def'],
-            props['min'],
-            props['max'],
+            props.get('min', 0),
+            props.get('max', 0),
             callback=callback
         )
 

@@ -2,7 +2,6 @@ from ble_role import BleRole
 from ve_types import *
 import logging
 
-
 class BleRoleTemperature(BleRole):
     """
     Temperature sensor role class.
@@ -22,7 +21,7 @@ class BleRoleTemperature(BleRole):
     }
 
     def __init__(self, config: dict = None):
-        super().__init__()
+        super().__init__(config)
 
         self.info.update(
             {

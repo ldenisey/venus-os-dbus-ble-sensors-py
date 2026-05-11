@@ -98,7 +98,6 @@ Each reg dictionary define how to extract one value from sensor manufacturer dat
 > [!NOTE]  
 > `VE_HEAP_STR` (string value) requires `bits` divisible by 8; raw value is NUL-stripped and decoded as UTF-8.
 
-
 #### Settings
 
 Settings dicts define values persisted on disk through dbus *com.victronenergy.ble* service.

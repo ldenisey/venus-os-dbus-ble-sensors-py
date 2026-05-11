@@ -2,7 +2,6 @@ from ve_types import *
 from ble_device import BleDevice
 from dbus_role_service import DbusRoleService
 
-
 class BleDeviceSafiery(BleDevice):
     """
     Safiery devices class managing Star-Tank devices.
@@ -35,6 +34,7 @@ class BleDeviceSafiery(BleDevice):
                     'offset': 1,
                     'bits': 7,
                     'scale': 32,
+                    'sensor_type': 'voltage',
                     # .format	= &veUnitVolt2Dec,
                 },
                 {
@@ -44,6 +44,7 @@ class BleDeviceSafiery(BleDevice):
                     'bits': 7,
                     'scale': 1,
                     'bias': -40,
+                    'sensor_type': 'temperature',
                     # .format	= &veUnitCelsius1Dec,
                 },
                 {
@@ -105,7 +106,11 @@ class BleDeviceSafiery(BleDevice):
         return True
 
     def _get_low_battery_state(self, role_service: DbusRoleService) -> int:
-        if (battery_voltage := role_service.get('BatteryVoltage', None)) is None:
+        try:
+            battery_voltage = role_service['BatteryVoltage']
+        except (KeyError, TypeError):
+            return 0
+        if battery_voltage is None:
             return 0
         # Percentage based on 3 volt CR2477 battery
         battery_percentage = max(0, min(100, ((battery_voltage - 2.2) / 0.65) * 100))

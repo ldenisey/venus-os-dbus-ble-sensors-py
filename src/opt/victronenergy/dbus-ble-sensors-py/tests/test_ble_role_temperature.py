@@ -5,7 +5,6 @@ from ble_role_temperature import BleRoleTemperature
 import unittest
 import logging
 
-
 class BleRoleTemperatureTests(unittest.TestCase):
     def setUp(self):
         #logging.basicConfig(level=logging.DEBUG)

@@ -5,7 +5,6 @@ import unittest
 import logging
 from ble_role_digitalinput import BleRoleDigitalInput
 
-
 class BleRoleDigitalInputTests(unittest.TestCase):
     def setUp(self):
         #logging.basicConfig(level=logging.DEBUG)

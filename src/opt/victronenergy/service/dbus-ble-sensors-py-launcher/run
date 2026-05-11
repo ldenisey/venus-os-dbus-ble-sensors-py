@@ -65,7 +65,6 @@ dbus-monitor --system \
   "type='signal',sender='com.victronenergy.settings',path='/Settings/Services/BleSensors',interface='com.victronenergy.BusItem',member='ValueChanged'" > "$FIFO" &
 MONITOR_PID=$!
 
-
 while IFS= read -r line; do
   case "$line" in
     *int32* )

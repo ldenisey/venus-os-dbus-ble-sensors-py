@@ -6,7 +6,6 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..', 'ext', 'velib_p
 from ble_device_base_tests import BleDeviceBaseTests
 from ble_device_mopeka import BleDeviceMopeka
 
-
 class BleDeviceSafieryTests(BleDeviceBaseTests):
     # To be executed with command : python3 -m unittest test_ble_device_mopeka.py
 
@@ -39,18 +38,49 @@ class BleDeviceSafieryTests(BleDeviceBaseTests):
                     'HardwareID': 3,
                     'TankLevelExtension': 0,
                     'BatteryVoltage': 3.125,
+                    'Temperature': 20.0,
                     'RawValue': 5000,
                 },
-                "temperature": {
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # Real Mopeka Pro Check tank-sensor advertisements captured via
+    # `btmon` on a production Cerbo GX, May 2026.  Each test rebinds
+    # self.device to a Mopeka with the actual broadcast MAC so that
+    # check_manufacturer_data's NIC validation (bytes 5-7 of the
+    # payload must equal the last 3 bytes of the device MAC) lines up
+    # with real hardware.
+    # ------------------------------------------------------------------
+
+    def test_capture_real_f45fe6a3daf4(self):
+        # Mopeka Pro Check F4:5F:E6:A3:DA:F4
+        self.device = BleDeviceMopeka('f45fe6a3daf4')
+        self._test_parsing(
+            bytes.fromhex('03573e50c5a3daf41029'),
+            {
+                'tank': {
                     'HardwareID': 3,
-                    'BatteryVoltage': 3.125,
-                    'Temperature': 20.0,
+                    'TankLevelExtension': 0,
+                    'BatteryVoltage': 2.71875,
+                    'Temperature': 22.0,
+                    'RawValue': 1360,
                 },
-                "movement": {
+            }
+        )
+
+    def test_capture_real_cb157d296144(self):
+        # Mopeka Pro Check CB:15:7D:29:61:44
+        self.device = BleDeviceMopeka('cb157d296144')
+        self._test_parsing(
+            bytes.fromhex('03583c4ec5296144e6fd'),
+            {
+                'tank': {
                     'HardwareID': 3,
-                    'BatteryVoltage': 3.125,
-                    'AccelX': -0.01171875,
-                    'AccelY': 0.0078125,
-                }
+                    'TankLevelExtension': 0,
+                    'BatteryVoltage': 2.75,
+                    'Temperature': 20.0,
+                    'RawValue': 1358,
+                },
             }
         )
