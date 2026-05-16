@@ -24,6 +24,9 @@ from load_throttle import (
     TRIP_15M,
     RELEASE_5M,
     RELEASE_15M,
+    _DEFAULT_MAX_LOAD_15,
+    _derive_thresholds,
+    _read_watchdog_max_load_15,
 )
 
 
@@ -248,3 +251,87 @@ class TestCallbackResilience:
         with caplog.at_level(logging.ERROR, logger="load_throttle"):
             t.tick()
         assert not t.is_throttled
+
+
+# ── /etc/watchdog.conf parsing & threshold derivation ──────────────────────
+
+
+class TestWatchdogConfParsing:
+    """The whole point of reading the watchdog config is so a sysadmin
+    who edits ``max-load-15`` in one place gets matching behaviour out
+    of our self-throttle without touching code.  These cover the
+    obvious shapes the file can take in the wild."""
+
+    def test_happy_path(self, tmp_path):
+        conf = tmp_path / "watchdog.conf"
+        conf.write_text("max-load-15 = 8\n")
+        assert _read_watchdog_max_load_15(str(conf)) == 8.0
+
+    def test_float_value(self, tmp_path):
+        conf = tmp_path / "watchdog.conf"
+        conf.write_text("max-load-15 = 7.5\n")
+        assert _read_watchdog_max_load_15(str(conf)) == 7.5
+
+    def test_no_spaces_around_equals(self, tmp_path):
+        conf = tmp_path / "watchdog.conf"
+        conf.write_text("max-load-15=4\n")
+        assert _read_watchdog_max_load_15(str(conf)) == 4.0
+
+    def test_comments_and_blank_lines_tolerated(self, tmp_path):
+        conf = tmp_path / "watchdog.conf"
+        conf.write_text(
+            "# Venus OS default watchdog.conf\n"
+            "\n"
+            "watchdog-device = /dev/watchdog\n"
+            "  # indented comment\n"
+            "max-load-15 = 6\n"
+            "interval = 10\n"
+        )
+        assert _read_watchdog_max_load_15(str(conf)) == 6.0
+
+    def test_missing_key_falls_back(self, tmp_path):
+        conf = tmp_path / "watchdog.conf"
+        conf.write_text("interval = 10\nrealtime = yes\n")
+        assert _read_watchdog_max_load_15(str(conf)) == _DEFAULT_MAX_LOAD_15
+
+    def test_missing_file_falls_back(self, tmp_path):
+        assert _read_watchdog_max_load_15(
+            str(tmp_path / "does-not-exist")) == _DEFAULT_MAX_LOAD_15
+
+    def test_malformed_value_falls_back(self, tmp_path):
+        """A garbled value shouldn't crash us — fall through to the
+        safe default and keep operating."""
+        conf = tmp_path / "watchdog.conf"
+        conf.write_text("max-load-15 = nope\n")
+        assert _read_watchdog_max_load_15(str(conf)) == _DEFAULT_MAX_LOAD_15
+
+    def test_no_equals_sign_skipped(self, tmp_path):
+        """Lines without '=' (section markers, stray words) are simply
+        ignored, not errored on."""
+        conf = tmp_path / "watchdog.conf"
+        conf.write_text("[section]\nmax-load-15 = 9\n")
+        assert _read_watchdog_max_load_15(str(conf)) == 9.0
+
+
+class TestDeriveThresholds:
+    def test_stock_value_matches_legacy_constants(self):
+        """With ``max-load-15 = 6`` (the stock Venus image value) the
+        derivation must reproduce the original hard-coded thresholds
+        (5.5, 6.0, 5.0, 5.0) so behaviour for existing installs is
+        unchanged."""
+        assert _derive_thresholds(6.0) == (5.5, 6.0, 5.0, 5.0)
+
+    def test_raised_value_shifts_all_four(self):
+        """If a sysadmin loosens the watchdog to ``max-load-15 = 8``,
+        all four self-throttle thresholds shift up by the same delta
+        so the 0.5 / 1.0 safety margins are preserved."""
+        assert _derive_thresholds(8.0) == (7.5, 8.0, 7.0, 7.0)
+
+    def test_fractional_input(self):
+        assert _derive_thresholds(6.5) == (6.0, 6.5, 5.5, 5.5)
+
+    def test_module_level_constants_match_derivation(self):
+        """The module-level ``TRIP_15M`` etc. should be whatever
+        :func:`_derive_thresholds` says given the file we read."""
+        expected = _derive_thresholds(_read_watchdog_max_load_15())
+        assert (TRIP_15M, TRIP_5M, RELEASE_15M, RELEASE_5M) == expected

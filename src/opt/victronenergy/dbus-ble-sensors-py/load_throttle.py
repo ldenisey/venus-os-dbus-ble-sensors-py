@@ -40,18 +40,83 @@ from collections.abc import Callable
 from typing import Optional
 
 
-# Threshold values intentionally hard-coded to mirror the cerbo's
-# /etc/watchdog.conf ``max-load-15 = 6`` policy.  Trip 0.5 below the
-# watchdog's own threshold so we get out of the way before it does.
-TRIP_15M: float = 5.5
-TRIP_5M: float = 6.0
-RELEASE_15M: float = 5.0
-RELEASE_5M: float = 5.0
-
-
+_WATCHDOG_CONF = "/etc/watchdog.conf"
 _LOADAVG_PATH = "/proc/loadavg"
 
+# Fallback if /etc/watchdog.conf is missing or doesn't set the key.
+# Matches the value Victron ships in the stock Venus OS image at the
+# time of writing.
+_DEFAULT_MAX_LOAD_15 = 6.0
+
 _logger = logging.getLogger(__name__)
+
+
+def _read_watchdog_max_load_15(path: str = _WATCHDOG_CONF) -> float:
+    """Parse ``max-load-15`` out of ``/etc/watchdog.conf``.
+
+    Returns the value as a float, or :data:`_DEFAULT_MAX_LOAD_15` if
+    the file is missing, unreadable, or doesn't set the key.  Format
+    is the watchdog daemon's own one-option-per-line ``key = value``
+    syntax; blank lines and ``#`` comments are tolerated.
+    """
+    try:
+        with open(path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' not in line:
+                    continue
+                key, _, val = line.partition('=')
+                if key.strip() == 'max-load-15':
+                    try:
+                        return float(val.strip())
+                    except ValueError:
+                        return _DEFAULT_MAX_LOAD_15
+    except OSError:
+        pass
+    return _DEFAULT_MAX_LOAD_15
+
+
+def _derive_thresholds(max_load_15: float) -> tuple[float, float, float, float]:
+    """Return ``(trip_15m, trip_5m, release_15m, release_5m)``.
+
+    Strategy: derive everything from the watchdog's own
+    ``max-load-15`` so a single source of truth controls both layers.
+
+      * trip_15m  = max_load_15 - 0.5  — get out of the way 0.5 before
+                                          the watchdog itself fires.
+      * trip_5m   = max_load_15        — short-window can graze the
+                                          long-window limit; we trip
+                                          at that point even though the
+                                          15-min hasn't caught up yet.
+      * release_*  = max_load_15 - 1.0 — hysteresis margin to avoid
+                                          flapping right at the trip
+                                          boundary.
+
+    With the stock ``max-load-15 = 6`` this returns
+    ``(5.5, 6.0, 5.0, 5.0)`` — identical to the previously hard-coded
+    values.
+    """
+    return (
+        max_load_15 - 0.5,
+        max_load_15,
+        max_load_15 - 1.0,
+        max_load_15 - 1.0,
+    )
+
+
+# Read once at import.  /etc/watchdog.conf changes require restarting
+# the watchdog daemon to take effect anyway, so a service restart on
+# our side is the natural moment to re-read.
+#
+# We intentionally do NOT log here — load_throttle is imported before
+# the service has called setup_logging(), so an import-time log line
+# would be silently dropped.  The first :class:`LoadThrottle` instance
+# emits the same diagnostic from its constructor instead, by which
+# point logging has been configured.
+_MAX_LOAD_15 = _read_watchdog_max_load_15()
+TRIP_15M, TRIP_5M, RELEASE_15M, RELEASE_5M = _derive_thresholds(_MAX_LOAD_15)
 
 
 class LoadThrottle:
@@ -89,6 +154,16 @@ class LoadThrottle:
         self._throttled: bool = False
         self._last_load_5m: Optional[float] = None
         self._last_load_15m: Optional[float] = None
+        # Logging is configured by the time the service actually
+        # constructs us (unlike at module-import time, where the
+        # derivation happens silently — see _MAX_LOAD_15 above).
+        _logger.info(
+            "load_throttle: thresholds derived from %s (max-load-15=%.1f): "
+            "trip 15m>=%.1f or 5m>=%.1f, release 15m<%.1f and 5m<%.1f",
+            _WATCHDOG_CONF, _MAX_LOAD_15,
+            self._trip_15m, self._trip_5m,
+            self._release_15m, self._release_5m,
+        )
 
     @property
     def is_throttled(self) -> bool:
