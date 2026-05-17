@@ -30,6 +30,7 @@ from ble_advertisement_router import BleAdvertisementRouter
 from sensor_rounding import SensorRoundingPolicy
 from sensor_publisher import SensorPublisher
 from load_throttle import LoadThrottle
+import hci_scan_control
 import platform_notifications
 
 ADV_LOG_QUIET_PERIOD = 1800
@@ -42,91 +43,26 @@ from man_id import MAN_NAMES
 SNIF_LOGGER = logging.getLogger("sniffer")
 SNIF_LOGGER.propagate = False
 
-_MONITOR_IFACE = 'org.bluez.AdvertisementMonitor1'
-_PROPS_IFACE = 'org.freedesktop.DBus.Properties'
-_OM_IFACE = 'org.freedesktop.DBus.ObjectManager'
-_MONITOR_APP_PATH = '/org/bluez/ble_sensors'
-_MONITOR_OBJ_PATH = _MONITOR_APP_PATH + '/0'
+# How often (seconds) to re-issue the HCI scan-enable commands on each
+# adapter.  Other things on the system (notably ``shyion-switch`` doing
+# active scans via bleak) can reset the controller's scan parameters
+# back to active or disable scanning entirely.  Re-issuing every minute
+# keeps us in passive mode with a worst-case 60 s gap.  See the
+# ``hci_scan_control`` module docstring for the full rationale.
+_SCAN_REENABLE_INTERVAL_S = 60
 
-_CATCH_ALL_PATTERN = dbus.Struct(
-    [dbus.Byte(0), dbus.Byte(0x01), dbus.Array([dbus.Byte(0x06)], signature='y')],
-    signature=None,
-)
 
-_MONITOR_PROPS = {
-    'Type': dbus.String('or_patterns'),
-    'Patterns': dbus.Array([_CATCH_ALL_PATTERN], signature='(yyay)'),
-}
+def _adapter_index(adapter_name: str) -> 'int | None':
+    """Convert a BlueZ adapter name (``hci0`` / ``hci1``) to the numeric
+    controller index expected by ``hci_scan_control``.  Returns None
+    for non-``hci<N>`` names so callers can skip cleanly."""
+    if not adapter_name.startswith('hci'):
+        return None
+    suffix = adapter_name[3:]
+    if not suffix.isdigit():
+        return None
+    return int(suffix)
 
-class _MonitorApp(dbus.service.Object):
-    """ObjectManager root that exposes AdvertisementMonitor children to BlueZ.
-
-    BlueZ's RegisterMonitor API uses g_dbus_client which calls
-    GetManagedObjects on the registered root to discover child objects
-    implementing AdvertisementMonitor1.
-    """
-
-    def __init__(self, bus: dbus.bus.BusConnection, path: str, child_path: str):
-        super().__init__(bus, path)
-        self._child_path = child_path
-
-    @dbus.service.method(_OM_IFACE, in_signature='', out_signature='a{oa{sa{sv}}}')
-    def GetManagedObjects(self):
-        return dbus.Dictionary({
-            dbus.ObjectPath(self._child_path): dbus.Dictionary({
-                _MONITOR_IFACE: dbus.Dictionary(_MONITOR_PROPS, signature='sv'),
-            }, signature='sa{sv}'),
-        }, signature='oa{sa{sv}}')
-
-class _AdvMonitor(dbus.service.Object):
-    """AdvertisementMonitor1 implementation for passive BLE scanning.
-
-    Registers a broad or_patterns monitor with BlueZ so the controller
-    performs passive scanning.  We match the common LE Flags byte (AD type
-    0x01, value 0x06 = General Discoverable | BR/EDR Not Supported) which
-    captures virtually all BLE peripherals.  The HCI tap does its own
-    manufacturer-ID filtering so this pattern is intentionally wide.
-    """
-
-    def __init__(self, bus: dbus.bus.BusConnection, path: str,
-                 on_release=None):
-        super().__init__(bus, path)
-        self._on_release = on_release
-
-    @dbus.service.method(_MONITOR_IFACE, in_signature='', out_signature='')
-    def Release(self):
-        logging.warning("AdvMonitor: released by BlueZ — will re-register")
-        if self._on_release:
-            self._on_release()
-
-    @dbus.service.method(_MONITOR_IFACE, in_signature='', out_signature='')
-    def Activate(self):
-        logging.info("AdvMonitor: passive scanning activated by BlueZ")
-
-    @dbus.service.method(_MONITOR_IFACE, in_signature='o', out_signature='')
-    def DeviceFound(self, device):
-        pass
-
-    @dbus.service.method(_MONITOR_IFACE, in_signature='o', out_signature='')
-    def DeviceLost(self, device):
-        pass
-
-    @dbus.service.method(_PROPS_IFACE, in_signature='ss', out_signature='v')
-    def Get(self, interface, prop):
-        if interface == _MONITOR_IFACE:
-            if prop == 'Type':
-                return _MONITOR_PROPS['Type']
-            if prop == 'Patterns':
-                return _MONITOR_PROPS['Patterns']
-        raise dbus.exceptions.DBusException(
-            f'No property {prop}',
-            name='org.freedesktop.DBus.Error.InvalidArgs')
-
-    @dbus.service.method(_PROPS_IFACE, in_signature='s', out_signature='a{sv}')
-    def GetAll(self, interface):
-        if interface == _MONITOR_IFACE:
-            return dbus.Dictionary(_MONITOR_PROPS, signature='sv')
-        return dbus.Dictionary({}, signature='sv')
 
 class DbusBleSensors(object):
     """
@@ -180,12 +116,10 @@ class DbusBleSensors(object):
         self._silence_warned: bool = False
         self._tap_thread: threading.Thread | None = None
         self._tap_stop = threading.Event()
-        self._monitor_app = _MonitorApp(self._dbus, _MONITOR_APP_PATH, _MONITOR_OBJ_PATH)
-        self._registered_adapters: set[str] = set()
-        self._monitor_obj = _AdvMonitor(
-            self._dbus, _MONITOR_OBJ_PATH,
-            on_release=self._registered_adapters.clear,
-        )
+        # Adapters we've enabled passive scan on (set of names like 'hci0').
+        # Replaces the old ``_registered_adapters`` from when we drove
+        # scanning by registering a bluez AdvertisementMonitor.
+        self._scan_enabled_adapters: set[str] = set()
 
         self._router = BleAdvertisementRouter(
             self._dbus,
@@ -241,7 +175,7 @@ class DbusBleSensors(object):
                 self._adapters.append(name)
                 self._adapter_paths[name] = str(path)
                 self._dbus_ble_service.add_ble_adapter(name, mac)
-                self._register_passive_monitor(name)
+                self._start_passive_scan(name)
 
     def _on_interfaces_removed(self, path, interfaces):
         if not str(path).startswith('/org/bluez'):
@@ -251,42 +185,68 @@ class DbusBleSensors(object):
             self._dbus_ble_service.remove_ble_adapter(name)
             self._adapters.remove(name)
             self._adapter_paths.pop(name, None)
-            self._registered_adapters.discard(name)
+            # Best-effort: turn off the controller's scanner before
+            # bluez tears the adapter down.  If the adapter is already
+            # gone the HCI socket open will fail; we swallow that.
+            try:
+                hci_scan_control.disable_passive_scan(_adapter_index(name))
+            except Exception:
+                pass
+            self._scan_enabled_adapters.discard(name)
             logging.info(f"{name}: adapter removed")
 
-    def _register_passive_monitor(self, adapter_name: str):
-        """Register the AdvertisementMonitor app with a BlueZ adapter.
+    def _start_passive_scan(self, adapter_name: str) -> None:
+        """Issue HCI commands to put the adapter into passive scan mode.
 
-        The HCI monitor tap is read-only — it sees traffic but cannot tell
-        the controller to scan.  This registers our AdvertisementMonitor1
-        hierarchy with BlueZ which triggers passive scanning on the adapter.
-        Unlike StartDiscovery (active scanning), this coexists cleanly with
-        other services that need active scans and GATT connections.
+        Replaces the previous BlueZ ``RegisterMonitor`` flow.  The
+        controller starts scanning, advertisement reports flow through
+        the kernel HCI socket, our ``HCI monitor tap`` reads them on
+        ``HCI_CHANNEL_MONITOR``, and BlueZ stays completely uninvolved
+        — no Device1 objects get created, no PropertiesChanged signals
+        get emitted, and dbus-daemon's heap stays flat.
 
-        Uses async D-Bus call to avoid deadlock: BlueZ needs to call
-        GetManagedObjects on our root during registration, which requires
-        the GLib main loop to dispatch the incoming call.
+        Bluez's GATT path is unaffected: the rare times we (or
+        shyion-switch) need a GATT session, ``bleak.connect(mac)``
+        calls ``Adapter1.ConnectDevice`` which creates the bluez
+        Device1 entry on demand, and bluez evicts it after disconnect.
         """
-        adapter_path = self._adapter_paths.get(adapter_name)
-        if not adapter_path or adapter_name in self._registered_adapters:
+        idx = _adapter_index(adapter_name)
+        if idx is None:
+            logging.warning(f"{adapter_name}: not an hci<N> adapter, cannot enable scan")
             return
-        try:
-            adapter = self._dbus.get_object('org.bluez', adapter_path)
-            mgr = dbus.Interface(adapter, 'org.bluez.AdvertisementMonitorManager1')
-            mgr.RegisterMonitor(
-                _MONITOR_APP_PATH,
-                reply_handler=lambda: self._on_monitor_registered(adapter_name),
-                error_handler=lambda exc: self._on_monitor_register_failed(adapter_name, exc),
-            )
-        except dbus.exceptions.DBusException as exc:
-            logging.warning(f"{adapter_name}: failed to register monitor: {exc}")
+        if hci_scan_control.enable_passive_scan(idx):
+            self._scan_enabled_adapters.add(adapter_name)
+            logging.info(f"{adapter_name}: passive scan enabled via HCI socket")
+        else:
+            logging.warning(f"{adapter_name}: passive scan enable failed; "
+                            "will retry on next periodic tick")
 
-    def _on_monitor_registered(self, adapter_name: str):
-        self._registered_adapters.add(adapter_name)
-        logging.info(f"{adapter_name}: passive scanning monitor registered")
+    def _scan_reenable_tick(self) -> bool:
+        """Re-issue the scan-enable HCI commands on every known adapter.
 
-    def _on_monitor_register_failed(self, adapter_name: str, exc):
-        logging.warning(f"{adapter_name}: failed to register monitor: {exc}")
+        Returns True so the GLib timer keeps firing.
+
+        Other services on the system (notably ``shyion-switch``) can
+        reset the controller's scan parameters when they do their own
+        active discovery.  Re-issuing the disable→params→enable
+        sequence brings us back to passive mode within at most one
+        tick.  When scanning is already in the requested state, the
+        controller returns Command Disallowed (0x0C) on the disable
+        step and the parameter/enable steps proceed normally.
+
+        Skipped while ``_throttled`` is True — the load-throttle
+        explicitly disabled scanning, the throttle release path will
+        re-enable when load drops.
+        """
+        if self._throttled:
+            return True
+        for adapter_name in list(self._adapter_paths):
+            idx = _adapter_index(adapter_name)
+            if idx is None:
+                continue
+            if hci_scan_control.enable_passive_scan(idx):
+                self._scan_enabled_adapters.add(adapter_name)
+        return True
 
     def _process_advertisement(self, dev_mac: str, manufacturer_data: dict[int, bytes],
                                adapter_index: int = 0, rssi: int = 0):
@@ -439,39 +399,36 @@ class DbusBleSensors(object):
         # ``LoadThrottle.tick`` always returns True so the timer
         # persists for the life of the process.
         GLib.timeout_add_seconds(30, self._throttle.tick)
+        # Periodic recovery of passive scan: re-issue the HCI
+        # disable→params→enable sequence in case another service did
+        # an active discovery and reset our scan parameters.  Worst-
+        # case recovery latency = _SCAN_REENABLE_INTERVAL_S.
+        GLib.timeout_add_seconds(_SCAN_REENABLE_INTERVAL_S, self._scan_reenable_tick)
 
     # ── Load-driven throttle ──────────────────────────────────────────────
 
-    def _unregister_passive_monitor(self, adapter_name: str) -> None:
-        """Tell BlueZ to drop our AdvertisementMonitor for this adapter.
+    def _stop_passive_scan_all(self) -> None:
+        """Disable LE scanning on every adapter we'd enabled.
 
-        Counterpart to ``_register_passive_monitor``.  Called when the
-        throttle trips so BlueZ stops driving the controller's passive
-        scan on our behalf — that's a meaningful chunk of the load on
-        the system at high LO levels.  Best-effort; logs and moves on
-        if BlueZ refuses (we'll fall through to re-register on release
-        anyway).
+        Called from the load-throttle trip path so the controller
+        stops draining radio + CPU during high-load conditions.  The
+        re-enable tick is also gated on ``_throttled`` so it won't
+        fight the disable.
         """
-        adapter_path = self._adapter_paths.get(adapter_name)
-        if not adapter_path or adapter_name not in self._registered_adapters:
-            return
-        try:
-            adapter = self._dbus.get_object('org.bluez', adapter_path)
-            mgr = dbus.Interface(adapter, 'org.bluez.AdvertisementMonitorManager1')
-            mgr.UnregisterMonitor(_MONITOR_APP_PATH)
-            self._registered_adapters.discard(adapter_name)
-            logging.info(f"{adapter_name}: passive scanning monitor unregistered (throttle)")
-        except dbus.exceptions.DBusException as exc:
-            logging.warning(
-                f"{adapter_name}: UnregisterMonitor failed: {exc}")
+        for adapter_name in list(self._scan_enabled_adapters):
+            idx = _adapter_index(adapter_name)
+            if idx is None:
+                continue
+            if hci_scan_control.disable_passive_scan(idx):
+                logging.info(f"{adapter_name}: passive scan disabled (throttle)")
+        self._scan_enabled_adapters.clear()
 
     def _on_load_trip(self, load_5m: float, load_15m: float) -> None:
         """Called by LoadThrottle when load crosses the trip threshold.
 
-        Stops the HCI tap thread (releases its CPU + closes the
-        kernel socket), unregisters our AdvertisementMonitor from each
-        adapter (BlueZ stops scanning on our behalf), and pushes a
-        warning notification to the GUI via the platform service.
+        Stops the HCI tap thread (releases its CPU + closes the kernel
+        socket), disables the controller's LE scan via HCI commands,
+        and pushes a warning notification to the GUI.
         """
         self._throttled = True
 
@@ -483,9 +440,8 @@ class DbusBleSensors(object):
         # (see the change in _prune_tick below).
         self._tap_thread = None
 
-        # Unregister AdvertisementMonitor on every adapter we'd registered.
-        for name in list(self._registered_adapters):
-            self._unregister_passive_monitor(name)
+        # Tell the controller to stop scanning.
+        self._stop_passive_scan_all()
 
         # Surface a warning notification to the Cerbo GUI.
         try:
@@ -503,9 +459,9 @@ class DbusBleSensors(object):
     def _on_load_released(self, load_5m: float, load_15m: float) -> None:
         """Called by LoadThrottle when load drops back below the release.
 
-        Restarts the HCI tap, re-registers the passive monitor on all
-        known adapters, and dismisses the GUI notification (it stays
-        in the history list for later review).
+        Restarts the HCI tap, re-enables passive scanning on every
+        known adapter, and dismisses the GUI notification (it stays in
+        the history list for later review).
         """
         self._throttled = False
 
@@ -513,11 +469,11 @@ class DbusBleSensors(object):
         # a fresh daemon thread.
         self._start_tap()
 
-        # Re-register the AdvertisementMonitor on each known adapter.
-        # _prune_tick would eventually do this on its own, but we do
-        # it eagerly to minimize the gap.
+        # Eagerly re-enable scanning on each adapter; the periodic
+        # _scan_reenable_tick would also pick this up, but doing it
+        # here minimises the recovery gap.
         for name in list(self._adapter_paths):
-            self._register_passive_monitor(name)
+            self._start_passive_scan(name)
 
         if self._throttle_notification is not None:
             try:
@@ -601,20 +557,24 @@ class DbusBleSensors(object):
                 self._tap_thread = None
                 self._start_tap()
 
-            # Re-register monitors on any adapter that lost its registration.
-            # Same throttle gate — don't re-arm what the throttle just
-            # explicitly disabled.
+            # Re-enable passive scan on any adapter that lost it.  The
+            # periodic _scan_reenable_tick covers this on a 60 s
+            # cadence; this is the eager path for the more frequent
+            # _prune_tick (30 s).
             for name in self._adapter_paths:
-                if name not in self._registered_adapters:
-                    self._register_passive_monitor(name)
+                if name not in self._scan_enabled_adapters:
+                    self._start_passive_scan(name)
 
-        # Silence detection: re-register passive monitors if no ads for 5 min
+        # Silence detection: force a scan re-enable if no ads for 5 min
         if self._last_tap_rx > 0 and now - self._last_tap_rx > SILENCE_WARNING_SECONDS:
             if not self._silence_warned:
                 logging.warning(
                     f"No matching advertisements received for "
-                    f"{int(now - self._last_tap_rx)}s — re-registering passive scan")
-                self._registered_adapters.clear()
+                    f"{int(now - self._last_tap_rx)}s — re-enabling passive scan")
+                # Drop our cached "scan is enabled" markers so the
+                # next _prune_tick / _scan_reenable_tick re-issues the
+                # HCI commands.
+                self._scan_enabled_adapters.clear()
                 self._silence_warned = True
 
         return True
