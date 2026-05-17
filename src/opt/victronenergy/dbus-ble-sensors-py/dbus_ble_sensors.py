@@ -352,9 +352,16 @@ class DbusBleSensors(object):
                 logging.warning(
                     f"{adapter_name}: passive scan enable failed "
                     f"(streak={streak}); will retry on next periodic tick. "
-                    "Another driver may own this controller (e.g. bluez's "
-                    "background scan, vesmart-server) — HCI tap still sees "
-                    "ads from any controller, so this is usually harmless.")
+                    "Most common cause on a Cerbo: this adapter is in LE "
+                    "advertising mode (broadcasting the Cerbo as a "
+                    "peripheral so the VRM app can find it), which "
+                    "prevents scan-parameter changes at the controller "
+                    "level.  The HCI tap is bound to HCI_DEV_NONE so it "
+                    "still receives ads from whichever adapter IS "
+                    "scanning, so this is usually harmless.  See "
+                    "`btmgmt --index N info` for the adapter's current "
+                    "settings — a `discoverable` entry indicates this is "
+                    "the advertising adapter.")
             else:
                 logging.debug(
                     f"{adapter_name}: passive scan enable failed (streak={streak})")
