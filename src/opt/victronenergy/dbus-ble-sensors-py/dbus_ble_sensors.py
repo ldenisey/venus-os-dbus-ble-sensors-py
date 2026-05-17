@@ -131,6 +131,17 @@ class DbusBleSensors(object):
     def __init__(self):
         self._dbus: dbus.bus.BusConnection = get_bus("org.bluez")
         self._dbus_ble_service = DbusBleService()
+        # Wire the GUI ``Continuous scanning`` toggle directly into our
+        # scan-mode re-apply path.  Without this we'd still pick up
+        # changes via the 60 s _scan_reenable_tick, but a GUI flip
+        # would have up-to-60 s latency before the filter policy
+        # actually changed on the controller.  Event-driven cuts that
+        # to milliseconds.  The polling tick stays as a backstop for
+        # the non-toggle reasons we need to re-apply scan params
+        # (shyion-switch's bleak resetting scan policy during active
+        # discovery, etc.).
+        self._dbus_ble_service.register_continuous_scan_callback(
+            self._on_continuous_scan_changed)
 
         # Settings-backed rounding policy + dedup/heartbeat publisher.
         # Constructed once here so every device driver inherits the same
@@ -278,6 +289,27 @@ class DbusBleSensors(object):
             self._mac_address_types_dirty = False
         except Exception:
             logging.exception(f"Failed to persist {_KNOWN_MAC_TYPES_PATH!r}")
+
+    def _on_continuous_scan_changed(self, new_value: bool) -> None:
+        """Called by DbusBleService when ``/Settings/BleSensors/ContinuousScan``
+        changes (GUI toggle, settings-restore, anywhere).
+
+        Re-applies the filter policy on every known adapter
+        immediately, so the new mode takes effect within milliseconds
+        instead of waiting for the next polling tick.  Skipped while
+        ``_throttled`` is True — the load throttle will re-apply
+        whichever policy is current at release time.
+        """
+        if self._throttled:
+            logging.info(
+                "ContinuousScan changed to %r while throttled; will apply "
+                "on next throttle release", new_value)
+            return
+        logging.info("ContinuousScan changed to %r — re-applying scan policy", new_value)
+        # Defer the actual re-apply to the periodic tick implementation
+        # so all the per-adapter loop / failure-streak / policy-diff
+        # logic stays in one place.
+        self._scan_reenable_tick()
 
     def _desired_filter_policy(self) -> int:
         """Return the controller filter policy that matches the current

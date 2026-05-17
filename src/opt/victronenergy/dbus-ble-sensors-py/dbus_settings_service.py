@@ -108,13 +108,33 @@ class DbusSettingsService(object):
             if (result := setting.set_value(new_value)) != 0:
                 logging.error(f"Failed to set setting {path!r} to {new_value!r}, result={result}.")
 
-    def set_proxy_callback(self, setting_path: str, remote_item: VeDbusItemExport):
+    def set_proxy_callback(self, setting_path: str, remote_item: VeDbusItemExport,
+                           on_change=None):
+        """Bridge ``setting_path`` on com.victronenergy.settings into the
+        local ``remote_item``.  When the upstream setting changes, the
+        local item is updated via ``local_set_value`` (silent — no
+        D-Bus signal of our own).
+
+        ``on_change``, if provided, is called with the new value
+        *after* the local item is updated.  This is the hook for
+        consumers that want to react to settings changes (e.g. GUI
+        toggles) without having to poll.  The local item's
+        ``_onchangecallback`` only fires when EXTERNAL D-Bus clients
+        write to OUR path, so it's the wrong hook for "GUI toggled
+        the setting in the settings service" — this is.
+        """
         def _callback(service_name, change_path, changes):
             if service_name != DbusSettingsService._SETTINGS_SERVICENAME or change_path != setting_path:
                 return
             new_value = changes['Value']
             if new_value != remote_item.local_get_value():
                 remote_item.local_set_value(new_value)
+            if on_change is not None:
+                try:
+                    on_change(new_value)
+                except Exception:
+                    logging.exception(
+                        f"set_proxy_callback on_change for {setting_path!r} raised")
         self.get_item(setting_path).eventCallback = _callback
 
     def unset_proxy_callback(self, setting_path: str):

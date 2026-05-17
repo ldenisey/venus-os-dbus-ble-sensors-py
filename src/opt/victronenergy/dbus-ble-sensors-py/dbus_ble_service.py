@@ -51,6 +51,12 @@ class DbusBleService(object):
 
         logging.info(f"Creating dbus service {self._BLE_SERVICENAME!r} on bus {self._bus}")
         self._dbus_ble_service = VeDbusService(self._BLE_SERVICENAME, self._bus, False)
+        # External consumers register here to be notified when
+        # /Settings/BleSensors/ContinuousScan changes.  The chain is
+        # set up by ``init_continuous_scan``.  Used by DbusBleSensors
+        # to re-apply scan filter policy immediately on GUI toggle
+        # rather than waiting for the 60 s polling tick.
+        self._continuous_scan_callbacks: list = []
         self.init_continuous_scan()
         self._dbus_ble_service.register()
 
@@ -126,12 +132,18 @@ class DbusBleService(object):
         # Get or set setting
         setting_item = self._dbus_settings.get_item(setting_path, default_value, min_value, max_value)
 
-        # Init item and custom callback
+        # Init item and custom callback for incoming writes on OUR path
+        # (rare — most clients flip settings via com.victronenergy.settings).
         self._set_value(item_path, setting_item.get_value())
         self._set_proxy_callback(item_path, setting_item, callback)
 
-        # Set settings callback
-        setting_item = self._dbus_settings.set_proxy_callback(setting_path, self._get_item(item_path))
+        # Bridge upstream-setting changes (the common path — GUI flips,
+        # settings restore) into our local item AND into the same
+        # callback.  Without ``on_change`` here, GUI toggles silently
+        # update the local item via ``local_set_value`` and the
+        # ``callback`` is never invoked.
+        setting_item = self._dbus_settings.set_proxy_callback(
+            setting_path, self._get_item(item_path), on_change=callback)
 
     def _delete_proxy_setting(self, setting_path: str, item_path: str, callback=None):
         # Remove setting callback
@@ -220,16 +232,42 @@ class DbusBleService(object):
         return False
 
     def init_continuous_scan(self):
-        def log(value):
+        def on_change(value):
             logging.info(f"Continuous scanning set to {value!r}")
+            # Fire every registered callback with the new value.  Each
+            # callback is responsible for its own error handling; we
+            # catch and log so one misbehaving callback doesn't break
+            # the chain for the rest.
+            for cb in list(self._continuous_scan_callbacks):
+                try:
+                    cb(bool(value))
+                except Exception:
+                    logging.exception(
+                        "ContinuousScan change callback raised")
         self._set_proxy_setting(
             '/Settings/BleSensors/ContinuousScan',
             '/ContinuousScan',
             0,
             0,
             1,
-            log
+            on_change
         )
 
     def get_continuous_scan(self) -> bool:
         return bool(self._dbus_ble_service['/ContinuousScan'])
+
+    def register_continuous_scan_callback(self, callback) -> None:
+        """Register *callback* to be invoked whenever
+        ``/Settings/BleSensors/ContinuousScan`` changes.
+
+        The callback receives a single ``bool`` argument (the new
+        value).  It is fired on the GLib main thread (same thread the
+        dbus signal dispatcher runs on), so callbacks can safely call
+        into other parts of the service without thread-synchronisation
+        concerns.
+
+        Callbacks accumulate; the original log-the-change behaviour is
+        always fired first.  Failures in one callback don't prevent
+        the others from running.
+        """
+        self._continuous_scan_callbacks.append(callback)
