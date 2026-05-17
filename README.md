@@ -106,6 +106,29 @@ In short devices can be enabled/disabled in *Settings* -> *Integrations* -> *Blu
 > Even though the configuration process is the same, the configuration themselves are NOT shared between this service and official ble service
 > hence configuration will have to be reset when switching between the two.
 
+## Continuous scanning
+
+The *Bluetooth Sensors* settings page has a **Continuous scanning** toggle:
+
+![Bluetooth Sensors settings page with the Continuous scanning toggle highlighted](docs/img/continuous-scanning-toggle.png)
+
+This service drives the BLE controller directly via a raw HCI socket and supports two scan modes that the toggle selects between.  **Leave Continuous scanning OFF in normal operation — only turn it on when you're adding a new device.**
+
+| Continuous scanning | Behaviour | When to use |
+| --- | --- | --- |
+| **OFF** (default) | The BLE controller is told to only accept advertisements from MAC addresses already configured on this Cerbo.  Random passersby (phones, fitness trackers, neighbours' beacons) are dropped at the radio link layer and never reach the host. | Normal operation.  Lowest CPU + memory + signal-rate.  Your configured sensors keep reporting at full rate. |
+| **ON** | The controller accepts every BLE advertisement it hears, so unconfigured devices can be discovered, paired, and added through the GUI's *Bluetooth Sensors* page. | Briefly while you're adding a new sensor.  Turn back off when you're done. |
+
+Mode changes apply within milliseconds — no service restart needed.
+
+**Why this matters.**  A Cerbo lives in a noisy radio environment (every nearby phone, watch, earbud, and tracker advertises constantly), and Linux's BlueZ caches every device it sees and emits a D-Bus `PropertiesChanged` signal on every advertisement received.  Each signal is a small allocation in `dbus-daemon` whose `glibc` allocator never returns memory to the OS, so over hours of accept-all scanning the daemon's heap climbs ~95 MB/hour until the Cerbo runs out of memory and the hardware watchdog reboots it.  The accept-list-only mode keeps the controller's radio busy delivering exactly the advertisements we want and dropping everything else.
+
+GATT operations (Orion-TR key provisioning, Shyion relay control, any `bleak.connect(mac)` call) are unaffected by the toggle.  When something explicitly connects to a paired or configured device by MAC, BlueZ creates the device object on demand and tears it down after disconnect — no advertisement-side caching required.
+
+The MAC allowlist is persisted at `/data/conf/dbus-ble-sensors-py-known-mac-types.json` so it survives reboots.  Devices get added to the allowlist automatically the first time the service successfully processes one of their advertisements (which requires Continuous scanning to be ON briefly during initial pairing).
+
+For implementation details, see [`docs/hci-tap-architecture.md`](docs/hci-tap-architecture.md) and the `hci_scan_control.py` module.
+
 ## Development
 
 For technical info and guide to add new devices, see [dedicated developer page](DEVELOPMENT.md).
