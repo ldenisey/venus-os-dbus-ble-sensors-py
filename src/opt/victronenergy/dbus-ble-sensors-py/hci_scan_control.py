@@ -71,6 +71,22 @@ _OGF_LE = 0x08
 _OCF_LE_SET_SCAN_PARAMS = 0x000B
 _OCF_LE_SET_SCAN_ENABLE = 0x000C
 
+# Filter Accept List management (formerly "Whitelist") — Bluetooth Core
+# Spec Vol 4 Part E §7.8.14–16.  The controller drops every advertisement
+# whose source address isn't in this list when scan parameters specify
+# filter policy 0x01.  List size is hardware-fixed (8–32 typical).
+_OCF_LE_READ_ACCEPT_LIST_SIZE = 0x000F
+_OCF_LE_CLEAR_ACCEPT_LIST = 0x0010
+_OCF_LE_ADD_DEVICE_TO_ACCEPT_LIST = 0x0011
+
+# Filter policy values for LE Set Scan Parameters
+FILTER_POLICY_ACCEPT_ALL = 0x00
+FILTER_POLICY_ACCEPT_LIST_ONLY = 0x01
+
+# Address types (LE Add Device To Filter Accept List parameter byte 0)
+ADDR_TYPE_PUBLIC = 0x00
+ADDR_TYPE_RANDOM = 0x01
+
 # ── setsockopt: install HCI event filter (bluez/lib/hci.h) ─────────────────
 _SOL_HCI = 0
 _HCI_FILTER = 2
@@ -189,7 +205,8 @@ _DEFAULT_SCAN_WINDOW = 0x0010
 
 def enable_passive_scan(adapter_index: int,
                         interval: int = _DEFAULT_SCAN_INTERVAL,
-                        window: int = _DEFAULT_SCAN_WINDOW) -> bool:
+                        window: int = _DEFAULT_SCAN_WINDOW,
+                        filter_policy: int = FILTER_POLICY_ACCEPT_ALL) -> bool:
     """Configure and enable passive LE scanning on the given adapter.
 
     Opens a short-lived HCI_CHANNEL_RAW socket, issues the three
@@ -204,6 +221,13 @@ def enable_passive_scan(adapter_index: int,
     already enabled (it returns Command Disallowed = 0x0C).  We
     tolerate that on the initial disable (in case scanning was off
     anyway) but require success on the parameter set and final enable.
+
+    ``filter_policy`` selects whether the controller delivers every
+    advertisement it hears (``FILTER_POLICY_ACCEPT_ALL`` — default)
+    or only those whose source MAC is in the Filter Accept List
+    (``FILTER_POLICY_ACCEPT_LIST_ONLY``).  Populate the accept list
+    via :func:`clear_accept_list` + :func:`add_device_to_accept_list`
+    *before* calling this with the restrictive policy.
     """
     try:
         s = open_hci_raw(adapter_index)
@@ -225,15 +249,21 @@ def enable_passive_scan(adapter_index: int,
 
         # 2. Set passive scan parameters.
         params = struct.pack("<BHHBB",
-                             0x00,        # Scan_Type 0 = passive
-                             interval,    # LE_Scan_Interval
-                             window,      # LE_Scan_Window
-                             0x00,        # Own_Address_Type 0 = public
-                             0x00)        # Filter_Policy 0 = accept all
+                             0x00,            # Scan_Type 0 = passive
+                             interval,        # LE_Scan_Interval
+                             window,          # LE_Scan_Window
+                             0x00,            # Own_Address_Type 0 = public
+                             filter_policy)   # Scanning_Filter_Policy
         status = _send_and_wait_complete(
             s, _OGF_LE, _OCF_LE_SET_SCAN_PARAMS, params)
         if status != 0x00:
-            _log.warning(f"hci{adapter_index}: LE Set Scan Parameters status=0x{status:02x}")
+            # 0x0C = Command Disallowed (scan already on under another
+            # driver's control); log at debug to avoid filling the log
+            # on systems where bluez or another service owns one of
+            # the adapters.
+            level = logging.DEBUG if status == 0x0C else logging.WARNING
+            _log.log(level,
+                f"hci{adapter_index}: LE Set Scan Parameters status=0x{status:02x}")
             return False
 
         # 3. Enable scanning, no duplicate filtering (we want every ad).
@@ -241,9 +271,223 @@ def enable_passive_scan(adapter_index: int,
             s, _OGF_LE, _OCF_LE_SET_SCAN_ENABLE,
             struct.pack("<BB", 0x01, 0x00))
         if status != 0x00:
-            _log.warning(f"hci{adapter_index}: LE Set Scan Enable status=0x{status:02x}")
+            level = logging.DEBUG if status == 0x0C else logging.WARNING
+            _log.log(level,
+                f"hci{adapter_index}: LE Set Scan Enable status=0x{status:02x}")
             return False
 
+        return True
+    finally:
+        s.close()
+
+
+def read_accept_list_size(adapter_index: int) -> 'int | None':
+    """Return the controller's Filter Accept List capacity.
+
+    Returns ``None`` if the read fails — typically because the
+    controller doesn't support the LE_Read_Filter_Accept_List_Size
+    command on this firmware revision.  Callers should treat None as
+    "feature unavailable, fall back to accept-all".
+    """
+    try:
+        s = open_hci_raw(adapter_index)
+    except OSError as exc:
+        _log.warning(f"hci{adapter_index}: open_hci_raw failed: {exc}")
+        return None
+    try:
+        opcode = (_OGF_LE << 10) | _OCF_LE_READ_ACCEPT_LIST_SIZE
+        s.send(_hci_cmd(_OGF_LE, _OCF_LE_READ_ACCEPT_LIST_SIZE, b''))
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            r, _, _ = select.select([s], [], [], max(0.0, deadline - time.monotonic()))
+            if not r:
+                break
+            data = s.recv(258)
+            if len(data) < 8 or data[0] != _HCI_EVT_PKT:
+                continue
+            if data[1] != _EVT_CMD_COMPLETE:
+                continue
+            if struct.unpack("<H", data[4:6])[0] != opcode:
+                continue
+            status = data[6]
+            if status != 0x00:
+                _log.warning(f"hci{adapter_index}: Read Accept List Size status=0x{status:02x}")
+                return None
+            return data[7]  # one-byte size
+        _log.warning(f"hci{adapter_index}: Read Accept List Size timed out")
+        return None
+    finally:
+        s.close()
+
+
+def clear_accept_list(adapter_index: int) -> bool:
+    """Empty the controller's Filter Accept List.
+
+    LE Clear Filter Accept List can only be issued while scanning is
+    disabled — caller is responsible for that.  The cleanest pattern:
+    disable scan → clear → add MACs → set params with filter policy →
+    enable scan.  See :func:`apply_accept_list` for the full sequence.
+    """
+    try:
+        s = open_hci_raw(adapter_index)
+    except OSError as exc:
+        _log.warning(f"hci{adapter_index}: open_hci_raw failed: {exc}")
+        return False
+    try:
+        status = _send_and_wait_complete(
+            s, _OGF_LE, _OCF_LE_CLEAR_ACCEPT_LIST, b'')
+        if status != 0x00:
+            _log.warning(f"hci{adapter_index}: Clear Accept List status=0x{status:02x}")
+            return False
+        return True
+    finally:
+        s.close()
+
+
+def _mac_str_to_le_bytes(mac: str) -> bytes:
+    """Convert a 12-hex-char no-separator MAC to little-endian 6 bytes.
+
+    Example: ``'00a0508d9569'`` → ``b'\\x69\\x95\\x8d\\x50\\xa0\\x00'``
+    (the controller expects LE byte order, opposite of the usual
+    human-readable colon notation).
+    """
+    if len(mac) != 12:
+        raise ValueError(f"expected 12 hex chars, got {len(mac)}: {mac!r}")
+    return bytes.fromhex(mac)[::-1]
+
+
+def add_device_to_accept_list(adapter_index: int, address_type: int,
+                              mac: str) -> bool:
+    """Add a single MAC + address_type pair to the controller's accept list.
+
+    ``mac`` is a 12-char lowercase no-separator hex string (the format
+    our HCI tap produces).  ``address_type`` is 0 (public) or 1
+    (random / random-static).
+
+    LE Add Device To Filter Accept List can be issued while scanning
+    is enabled or disabled (different from Clear/SetParams), so this
+    is the cheapest of the three accept-list management commands.
+    """
+    if address_type not in (ADDR_TYPE_PUBLIC, ADDR_TYPE_RANDOM):
+        _log.warning(f"add_device_to_accept_list: unexpected address_type {address_type}")
+        return False
+    try:
+        s = open_hci_raw(adapter_index)
+    except OSError as exc:
+        _log.warning(f"hci{adapter_index}: open_hci_raw failed: {exc}")
+        return False
+    try:
+        try:
+            params = bytes([address_type]) + _mac_str_to_le_bytes(mac)
+        except ValueError as exc:
+            _log.warning(f"add_device_to_accept_list: bad MAC {mac!r}: {exc}")
+            return False
+        status = _send_and_wait_complete(
+            s, _OGF_LE, _OCF_LE_ADD_DEVICE_TO_ACCEPT_LIST, params)
+        if status != 0x00:
+            # 0x12 = Invalid Parameters, 0x07 = Memory Capacity Exceeded
+            # — both worth logging at warn so the caller can react.
+            _log.warning(
+                f"hci{adapter_index}: Add {mac}/{address_type} to accept list "
+                f"status=0x{status:02x}")
+            return False
+        return True
+    finally:
+        s.close()
+
+
+def apply_accept_list(adapter_index: int,
+                      devices: 'list[tuple[str, int]]',
+                      interval: int = _DEFAULT_SCAN_INTERVAL,
+                      window: int = _DEFAULT_SCAN_WINDOW) -> bool:
+    """Atomically replace the controller's accept list and (re)enable scanning
+    in accept-list-only mode.
+
+    Disables scanning, clears the list, adds every (mac, address_type)
+    in ``devices``, then re-enables scanning with
+    ``FILTER_POLICY_ACCEPT_LIST_ONLY``.  All in one HCI socket open
+    so we minimise the scan-disabled window.
+
+    Skips entries that fail to add (e.g. if the controller's list
+    overflows) but still completes the rest.  Returns True if the
+    final scan-enable succeeded.
+    """
+    try:
+        s = open_hci_raw(adapter_index)
+    except OSError as exc:
+        _log.warning(f"hci{adapter_index}: open_hci_raw failed: {exc}")
+        return False
+    try:
+        # Disable scanning so Clear/SetParams are accepted.
+        try:
+            _send_and_wait_complete(
+                s, _OGF_LE, _OCF_LE_SET_SCAN_ENABLE,
+                struct.pack("<BB", 0x00, 0x00))
+        except TimeoutError:
+            pass
+
+        # Clear & repopulate.
+        status = _send_and_wait_complete(
+            s, _OGF_LE, _OCF_LE_CLEAR_ACCEPT_LIST, b'')
+        if status != 0x00:
+            _log.warning(f"hci{adapter_index}: Clear Accept List status=0x{status:02x}")
+            return False
+
+        added = 0
+        for mac, addr_type in devices:
+            try:
+                params = bytes([addr_type]) + _mac_str_to_le_bytes(mac)
+            except ValueError as exc:
+                _log.warning(f"apply_accept_list: bad MAC {mac!r}: {exc}")
+                continue
+            try:
+                status = _send_and_wait_complete(
+                    s, _OGF_LE, _OCF_LE_ADD_DEVICE_TO_ACCEPT_LIST, params)
+                if status != 0x00:
+                    _log.warning(
+                        f"hci{adapter_index}: Add {mac}/{addr_type} status=0x{status:02x}")
+                    continue
+                added += 1
+            except TimeoutError as exc:
+                _log.warning(f"hci{adapter_index}: Add {mac} timed out: {exc}")
+                continue
+
+        # Set parameters with filter_policy=1 then re-enable.
+        params = struct.pack(
+            "<BHHBB",
+            0x00,        # passive
+            interval,
+            window,
+            0x00,        # public own_addr_type
+            FILTER_POLICY_ACCEPT_LIST_ONLY,
+        )
+        status = _send_and_wait_complete(
+            s, _OGF_LE, _OCF_LE_SET_SCAN_PARAMS, params)
+        if status != 0x00:
+            # 0x0C = Command Disallowed.  Typically means scanning is
+            # already on under another driver's control; that's
+            # informational not exceptional, so log at debug.  Higher
+            # layer (DbusBleSensors._start_passive_scan) handles
+            # user-facing notification with streak throttling.
+            level = logging.DEBUG if status == 0x0C else logging.WARNING
+            _log.log(level,
+                f"hci{adapter_index}: Set Scan Params (accept-list) status=0x{status:02x}")
+            return False
+
+        status = _send_and_wait_complete(
+            s, _OGF_LE, _OCF_LE_SET_SCAN_ENABLE,
+            struct.pack("<BB", 0x01, 0x00))
+        if status != 0x00:
+            level = logging.DEBUG if status == 0x0C else logging.WARNING
+            _log.log(level,
+                f"hci{adapter_index}: Set Scan Enable (accept-list) status=0x{status:02x}")
+            return False
+
+        # Steady-state re-apply happens every periodic tick.  Log at
+        # debug here; the higher-level caller in DbusBleSensors logs
+        # at info on transitions (policy change, first enable).
+        _log.debug(f"hci{adapter_index}: accept-list scan active "
+                   f"({added}/{len(devices)} devices in list)")
         return True
     finally:
         s.close()
